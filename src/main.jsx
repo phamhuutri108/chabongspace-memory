@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { readImageMetadata, createWebpPreview } from './utils/media.js';
+import { readImageMetadata, createWebpPreview, optimizeUploadFile } from './utils/media.js';
 
 const API = '/api';
 
@@ -405,8 +405,9 @@ function App() {
     }
   }
 
-  // Direct Upload Pipeline to Worker (R2 + D1)
-  async function createUpload(file) {
+  // Tối ưu hóa file gốc và nén preview WebP siêu nhẹ (< 200KB)
+  async function createUpload(rawFile) {
+    const file = await optimizeUploadFile(rawFile);
     const id = crypto.randomUUID();
     const meta = await readImageMetadata(file);
     const { blob: previewBlob, width: pw, height: ph } = await createWebpPreview(file);
@@ -466,7 +467,7 @@ function App() {
   async function startCamera() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 2160 }, height: { ideal: 3840 } },
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       });
       streamRef.current = s;
@@ -492,9 +493,16 @@ function App() {
     const v = videoRef.current;
     if (!v) return;
     const c = document.createElement('canvas');
-    c.width = Math.min(v.videoWidth || 1920, 2400);
-    c.height = Math.round((c.width * (v.videoHeight || 1080)) / (v.videoWidth || 1920));
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    const maxW = 1920;
+    let cw = v.videoWidth || 1920;
+    let ch = v.videoHeight || 1080;
+    if (cw > maxW) {
+      ch = Math.round((ch * maxW) / cw);
+      cw = maxW;
+    }
+    c.width = cw;
+    c.height = ch;
+    c.getContext('2d').drawImage(v, 0, 0, cw, ch);
     c.toBlob(
       async (b) => {
         if (!b) {
@@ -511,7 +519,7 @@ function App() {
         }
       },
       'image/jpeg',
-      0.9
+      0.82
     );
   }
 
