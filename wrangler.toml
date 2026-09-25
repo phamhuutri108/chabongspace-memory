@@ -1,0 +1,20 @@
+name = "chabongspace-memory"
+main = "worker/index.js"
+compatibility_date = "2026-09-25"
+account_id = "728f48cca2b820be7015a84a32b4f809"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "chabongspace-memory"
+database_id = "REPLACE_AFTER_CREATION"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "chabongspace-memory-media"
+
+[ai]
+binding = "AI"

@@ -1,0 +1,76 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Space+Mono:wght@400;700&display=swap');
+*{box-sizing:border-box}
+html,body,#app{margin:0;width:100%;height:100%;overflow:hidden;font-family:'Space Mono',monospace;color:#171717;-webkit-text-size-adjust:100%}
+body{background:#fff;user-select:none;-webkit-user-select:none}
+button,input{font:inherit}
+input{user-select:text;-webkit-user-select:text}
+button{cursor:pointer}
+.gate{min-height:100svh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 40%,#faf7f0,#fff 55%)}
+.gate-card{text-align:center;width:min(420px,100%)}
+.mark{font:64px 'DM Serif Display';margin-bottom:18px}
+.eyebrow{font-size:10px;letter-spacing:.22em;color:#888}
+.gate h1{font:clamp(48px,12vw,82px)/.85 'DM Serif Display';font-weight:400;margin:20px 0}
+.muted{color:#777;font-size:11px;line-height:1.8;margin:28px auto;max-width:300px}
+.gate form{display:flex;border-bottom:1px solid #222}
+.gate input{border:0;outline:0;flex:1;padding:15px 0;background:transparent;font-size:12px}
+.icon-button{width:42px;height:42px;display:grid;place-items:center;border:1px solid #ddd;border-radius:50%;background:rgba(255,255,255,.92);color:#171717;padding:0;backdrop-filter:blur(10px)}
+.icon-button:hover{background:#f4f4f4}
+.icon-button:disabled{opacity:.45;cursor:default}
+.icon{width:17px;height:17px}
+.gate .icon-button{border:0;background:transparent;border-radius:0}
+.app{width:100%;height:100%;background:#fff}
+header{position:fixed;z-index:20;left:0;right:0;top:0;display:flex;justify-content:space-between;align-items:flex-start;padding:24px 28px;pointer-events:none;background:linear-gradient(#fff,rgba(255,255,255,0))}
+header>*{pointer-events:auto}
+.count{font-size:12px;letter-spacing:.08em;color:#666}
+.actions{position:fixed;z-index:22;right:24px;bottom:24px;display:flex;flex-direction:column;gap:8px}
+.toolbar{position:fixed;z-index:50;top:104px;left:28px;display:flex;align-items:flex-start;pointer-events:none}.toolbar>*{pointer-events:auto}
+.tool-row{display:flex;gap:7px;align-items:center}
+.filter-wrap{position:relative}
+.filters{position:absolute;top:calc(100% + 10px);left:0;display:flex;flex-direction:column;gap:9px;width:280px;max-width:calc(100vw - 32px);padding:14px;border:1px solid #e5e5e5;border-radius:16px;background:rgba(255,255,255,.97);box-shadow:0 14px 40px rgba(0,0,0,.09);backdrop-filter:blur(16px)}
+.clear-filter{order:-1!important;width:100%;margin:0!important;padding:7px 8px!important;min-height:32px!important;color:#999!important;font-size:10px!important;letter-spacing:.08em;text-transform:uppercase}
+.filter-section{display:flex;flex-direction:column;gap:2px}
+.filter-section+ .filter-section{padding-top:9px;border-top:1px solid #eee}
+.filter-section>span{padding:3px 8px 7px;color:#999;font-size:10px;letter-spacing:.13em;text-transform:uppercase}
+.range-calendar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;width:100%}
+.range-calendar label{display:flex;flex-direction:column;gap:5px;min-width:0}
+.range-calendar small{display:block;color:#999;font-size:9px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:5px}
+.range-calendar input{display:block;width:100%;min-width:0;height:40px;border:1px solid #e3e3e3;border-radius:10px;background:#fff;padding:0 7px;font-size:12px;outline:0;-webkit-appearance:none;appearance:none}
+.range-calendar input:focus{border-color:#aaa}
+.filters button{border:0;border-radius:10px;background:transparent;color:#333;text-align:left;padding:11px 10px;font-size:12px;min-height:40px}
+.filters button:hover{background:#f4f4f4}
+.search-row{position:absolute;top:52px;left:0;width:min(300px,calc(100vw - 32px));}
+.search-row input{display:block;width:100%;height:50px;border:1px solid #ddd;border-radius:16px;padding:0 16px;font-size:16px;line-height:50px;outline:0;background:rgba(255,255,255,.98);box-shadow:0 12px 34px rgba(0,0,0,.08);backdrop-filter:blur(18px);-webkit-appearance:none;appearance:none}
+.search-row input::placeholder{font-size:13px;color:#999}
+.canvas-controls{position:fixed;z-index:22;right:24px;bottom:24px;display:flex;align-items:center;padding:4px;border:1px solid #e5e5e5;border-radius:50%;background:rgba(255,255,255,.9);backdrop-filter:blur(10px)}
+.canvas-controls .icon-button{border:0;background:transparent}
+.viewport{position:fixed;inset:0;overflow:hidden;touch-action:none;cursor:grab;background:#fff}
+.viewport:active{cursor:grabbing}
+.world{position:absolute;left:0;top:0;width:4200px;height:2900px;transform-origin:0 0;will-change:transform}
+.photo{position:absolute;cursor:zoom-in;user-select:none;-webkit-user-select:none;transform-origin:center center}
+.photo img{display:block;width:100%;height:auto;object-fit:contain;box-shadow:0 7px 18px rgba(0,0,0,.13);user-select:none;-webkit-user-drag:none}
+.photo:hover{z-index:3;filter:brightness(.98) drop-shadow(0 9px 16px rgba(0,0,0,.08))}
+.lightbox{position:fixed;inset:0;z-index:30;background:rgba(255,255,255,.97);display:grid;place-items:center;padding:7vh 7vw;cursor:zoom-out}
+.lightbox img{max-width:90vw;max-height:78vh;object-fit:contain}
+.lightbox div{position:absolute;bottom:28px;left:28px}
+.lightbox b{font-size:12px;font-weight:400}
+.lightbox small{display:block;color:#888;margin-top:6px;font-size:9px}
+.camera{position:fixed;z-index:40;inset:0;background:#111;display:grid;place-items:center}
+.camera video{width:100%;height:100%;object-fit:contain}
+.camera>div{position:fixed;bottom:28px;display:flex;gap:12px}
+.camera .icon-button{width:48px;height:48px}
+.camera .icon-button:first-child{background:#fff}
+@media(max-width:760px){
+ header{padding:18px 16px}
+ .actions{right:14px;bottom:16px;gap:8px}
+ .toolbar{top:78px;left:16px}
+ .toolbar{top:76px;left:16px}
+ .search-row{top:54px;width:min(320px,calc(100vw - 32px))}
+ .search-row input{height:52px;font-size:16px}
+ .filters{position:fixed;top:130px;left:16px;right:16px;width:auto;max-width:none;max-height:min(70svh,520px);overflow:auto}
+ .range-calendar{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+ .range-calendar input{width:100%;min-width:0;padding-left:6px;padding-right:6px;font-size:11px}
+ .clear-filter{padding-left:8px!important}
+ .canvas-controls{left:14px;right:auto;bottom:16px}
+ .world{width:4200px;height:2900px}
+ .gate h1{font-size:58px}
+}
