@@ -320,7 +320,6 @@ function App() {
         alert(data.error || 'Password không đúng');
       }
     } catch {
-      // Fallback local verify nếu chưa chạy backend worker
       if (password === '04112003') {
         sessionStorage.setItem('memory-auth', '1');
         setAuthed(true);
@@ -406,70 +405,44 @@ function App() {
     }
   }
 
-  // Dual-Key Upload Pipeline: Original File + Compressed WebP Preview
+  // Direct Upload Pipeline to Worker (R2 + D1)
   async function createUpload(file) {
     const id = crypto.randomUUID();
     const meta = await readImageMetadata(file);
     const { blob: previewBlob, width: pw, height: ph } = await createWebpPreview(file);
 
-    const initPayload = {
-      id,
-      mimeType: file.type || 'image/jpeg',
-      previewMimeType: 'image/webp',
-      sizeBytes: file.size,
-      width: pw || meta.width,
-      height: ph || meta.height,
-      capturedAt: meta.capturedAt,
-      caption: file.name.replace(/\.[^/.]+$/, '')
-    };
+    const formData = new FormData();
+    formData.append('file', file);
+    if (previewBlob) {
+      formData.append('preview', previewBlob, 'preview.webp');
+    }
+    formData.append('id', id);
+    formData.append('caption', file.name.replace(/\.[^/.]+$/, ''));
+    formData.append('capturedAt', meta.capturedAt);
+    formData.append('width', String(pw || meta.width));
+    formData.append('height', String(ph || meta.height));
+    formData.append('sizeBytes', String(file.size));
+    formData.append('mimeType', file.type || 'image/jpeg');
 
-    const r = await fetch(API + '/uploads', {
+    const res = await fetch(API + '/upload', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(initPayload)
-    });
-    if (!r.ok) throw Error('Khởi tạo upload thất bại');
-    const data = await r.json();
-
-    // 1. Upload file gốc
-    await fetch(data.uploadUrl, {
-      method: 'PUT',
-      headers: { 'content-type': initPayload.mimeType },
-      body: file
+      body: formData
     });
 
-    // 2. Upload bản preview WebP
-    if (data.previewUrl && previewBlob) {
-      await fetch(data.previewUrl, {
-        method: 'PUT',
-        headers: { 'content-type': 'image/webp' },
-        body: previewBlob
-      });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Lỗi server (' + res.status + ')');
     }
 
-    // 3. Hoàn tất upload và xác nhận vào D1
-    await fetch(API + '/uploads/complete', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        id,
-        sizeBytes: file.size,
-        caption: initPayload.caption,
-        width: initPayload.width,
-        height: initPayload.height,
-        capturedAt: initPayload.capturedAt
-      })
-    });
-
+    const previewUrl = previewBlob ? URL.createObjectURL(previewBlob) : URL.createObjectURL(file);
     return {
       id,
-      src: URL.createObjectURL(previewBlob || file),
-      ratio: (initPayload.width && initPayload.height ? initPayload.width / initPayload.height : meta.ratio) || 1,
+      src: previewUrl,
+      ratio: (pw && ph ? pw / ph : meta.ratio) || 1,
       date: (meta.capturedAt || new Date().toISOString()).slice(0, 10),
       tag: 'upload',
-      caption: initPayload.caption
+      caption: file.name.replace(/\.[^/.]+$/, '')
     };
   }
 
@@ -483,7 +456,7 @@ function App() {
       }
       setPhotos((x) => [...added, ...x]);
     } catch (err) {
-      alert('Upload chưa hoàn tất: ' + err.message);
+      alert('Upload chưa hoàn tất: ' + (err.message || 'Lỗi'));
     } finally {
       setBusy(false);
       e.target.value = '';
@@ -516,24 +489,29 @@ function App() {
   }
 
   function capture() {
-    const v = videoRef.current,
-      c = document.createElement('canvas');
-    c.width = Math.min(v.videoWidth, 2400);
-    c.height = Math.round((c.width * v.videoHeight) / v.videoWidth);
+    const v = videoRef.current;
+    if (!v) return;
+    const c = document.createElement('canvas');
+    c.width = Math.min(v.videoWidth || 1920, 2400);
+    c.height = Math.round((c.width * (v.videoHeight || 1080)) / (v.videoWidth || 1920));
     c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
     c.toBlob(
       async (b) => {
+        if (!b) {
+          alert('Không thể tạo file từ camera');
+          return;
+        }
         const file = new File([b], 'memory-' + Date.now() + '.jpg', { type: 'image/jpeg' });
         try {
           const item = await createUpload(file);
           setPhotos((x) => [item, ...x]);
-        } catch {
-          alert('Không thể lưu ảnh');
+          stopCamera();
+        } catch (err) {
+          alert('Không thể lưu ảnh: ' + (err.message || 'Lỗi không xác định'));
         }
-        stopCamera();
       },
       'image/jpeg',
-      0.88
+      0.9
     );
   }
 
@@ -579,20 +557,16 @@ function App() {
     setEditing(false);
   }
 
-  async function handleDownloadOriginal(photo) {
-    try {
-      const res = await fetch(API + '/download?id=' + photo.id, { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.url) {
-          window.open(data.url, '_blank');
-          return;
-        }
-      }
-    } catch {}
-    if (photo.src) {
-      window.open(photo.src, '_blank');
-    }
+  function handleDownloadOriginal(photo) {
+    if (!photo) return;
+    const downloadUrl = API + '/download?id=' + photo.id;
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = (photo.caption || 'memory') + '.jpg';
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   if (!authed) {

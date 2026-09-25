@@ -25,6 +25,39 @@ function getCors(request, extra = {}) {
   };
 }
 
+let dbInitialized = false;
+async function ensureDb(env) {
+  if (!env.DB || dbInitialized) return;
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS photos (
+        id TEXT PRIMARY KEY,
+        r2_key TEXT NOT NULL,
+        preview_key TEXT,
+        created_at TEXT NOT NULL,
+        captured_at TEXT,
+        caption TEXT,
+        location TEXT,
+        event TEXT,
+        person TEXT,
+        pet TEXT,
+        ai_labels TEXT,
+        tags TEXT,
+        width INTEGER,
+        height INTEGER,
+        size_bytes INTEGER,
+        mime_type TEXT,
+        status TEXT NOT NULL DEFAULT 'ready'
+      );
+    `).run();
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_photos_created_at ON photos(created_at);").run().catch(() => {});
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_photos_captured_at ON photos(captured_at);").run().catch(() => {});
+    dbInitialized = true;
+  } catch (e) {
+    console.error("DB initialization error:", e);
+  }
+}
+
 async function getHmacKey(secret) {
   const enc = new TextEncoder();
   return crypto.subtle.importKey(
@@ -75,28 +108,6 @@ async function isAuthorized(request, env) {
   return verifyToken(secret, token);
 }
 
-async function signR2(env, key, method, contentType) {
-  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
-    throw new Error("R2 S3 API credentials not configured in environment");
-  }
-  const client = new AwsClient({
-    accessKeyId: env.R2_ACCESS_KEY_ID,
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY
-  });
-  const url = new URL(
-    `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET_NAME || "chabongspace-memory-media"}/${key}`
-  );
-  url.searchParams.set("X-Amz-Expires", "900");
-  const signed = await client.sign(
-    new Request(url, {
-      method,
-      headers: contentType ? { "content-type": contentType } : {}
-    }),
-    { aws: { signQuery: true } }
-  );
-  return signed.url;
-}
-
 export default {
   async fetch(request, env) {
     const cors = getCors(request);
@@ -129,9 +140,7 @@ export default {
           headers.set("access-control-allow-origin", "*");
           return new Response(object.body, { headers });
         }
-        // Fallback to S3 presigned redirect if MEDIA binding is missing
-        const signedUrl = await signR2(env, key, "GET");
-        return Response.redirect(signedUrl, 302);
+        return new Response("Storage not configured", { status: 503 });
       }
 
       // 3. Auth endpoints
@@ -179,6 +188,9 @@ export default {
         return json({ error: "Unauthorized" }, { status: 401, headers: cors });
       }
 
+      // Auto ensure DB schema
+      await ensureDb(env);
+
       // 4. Tags list
       if (url.pathname === "/api/tags" && request.method === "GET") {
         if (!env.DB) return json([], { headers: cors });
@@ -198,7 +210,7 @@ export default {
 
       // 5. Photos query with full filtering & pagination
       if (url.pathname === "/api/photos" && request.method === "GET") {
-        if (!env.DB) return json([], { headers: cors });
+        if (!env.DB) return json({ photos: [], nextCursor: null }, { headers: cors });
         const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 100), 1), 500);
         const q = (url.searchParams.get("q") || "").trim().toLowerCase();
         const tag = (url.searchParams.get("tag") || "").trim().toLowerCase();
@@ -234,7 +246,6 @@ export default {
 
         if (to) {
           conditions.push("COALESCE(captured_at, created_at) <= ?");
-          // Include the entire end day
           params.push(to.length === 10 ? `${to}T23:59:59.999Z` : to);
         }
 
@@ -259,130 +270,163 @@ export default {
         return json({ photos: results, nextCursor }, { headers: cors });
       }
 
-      // 6. Photo details / update
+      // 6. Direct Upload via R2 binding (Fast, No S3 token required!)
+      if (url.pathname === "/api/upload" && request.method === "POST") {
+        if (!env.MEDIA) {
+          return json({ error: "Cloudflare R2 MEDIA binding not found" }, { status: 500, headers: cors });
+        }
+        const formData = await request.formData();
+        const file = formData.get("file");
+        const preview = formData.get("preview");
+        const id = formData.get("id") || crypto.randomUUID();
+        const caption = formData.get("caption") || "";
+        const tags = formData.get("tags") || "";
+        const capturedAt = formData.get("capturedAt") || new Date().toISOString();
+        const width = Number(formData.get("width")) || null;
+        const height = Number(formData.get("height")) || null;
+        const mimeType = file?.type || formData.get("mimeType") || "image/jpeg";
+        const sizeBytes = file?.size || Number(formData.get("sizeBytes")) || null;
+
+        if (!file) {
+          return json({ error: "File data is required" }, { status: 400, headers: cors });
+        }
+
+        const now = new Date();
+        const year = now.getUTCFullYear();
+        const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+        const key = `photos/${year}/${month}/${id}/original`;
+        const previewKey = `photos/${year}/${month}/${id}/preview.webp`;
+
+        // Upload directly into R2
+        await env.MEDIA.put(key, file.stream(), {
+          httpMetadata: { contentType: mimeType }
+        });
+
+        if (preview && typeof preview.stream === "function") {
+          await env.MEDIA.put(previewKey, preview.stream(), {
+            httpMetadata: { contentType: "image/webp" }
+          });
+        }
+
+        // Save metadata into D1
+        if (env.DB) {
+          await env.DB.prepare(
+            `INSERT INTO photos (
+              id, r2_key, preview_key, created_at, captured_at, caption,
+              tags, width, height, size_bytes, mime_type, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
+            ON CONFLICT(id) DO UPDATE SET
+              r2_key = excluded.r2_key,
+              preview_key = excluded.preview_key,
+              status = 'ready',
+              width = COALESCE(excluded.width, photos.width),
+              height = COALESCE(excluded.height, photos.height),
+              caption = COALESCE(excluded.caption, photos.caption)`
+          )
+            .bind(
+              id,
+              key,
+              previewKey,
+              now.toISOString(),
+              capturedAt,
+              caption || null,
+              tags || null,
+              width,
+              height,
+              sizeBytes,
+              mimeType
+            )
+            .run();
+        }
+
+        return json(
+          {
+            ok: true,
+            id,
+            key,
+            previewKey,
+            caption,
+            capturedAt,
+            width,
+            height
+          },
+          { headers: cors }
+        );
+      }
+
+      // 7. Photo update
       if (url.pathname === "/api/photos/update" && request.method === "POST") {
         const body = await request.json().catch(() => ({}));
         if (!body.id) return json({ error: "id is required" }, { status: 400, headers: cors });
-        await env.DB.prepare(
-          `UPDATE photos
-           SET caption = COALESCE(?, caption),
-               tags = COALESCE(?, tags),
-               captured_at = COALESCE(?, captured_at),
-               location = COALESCE(?, location),
-               event = COALESCE(?, event)
-           WHERE id = ?`
-        )
-          .bind(
-            body.caption !== undefined ? body.caption : null,
-            body.tags !== undefined ? body.tags : null,
-            body.capturedAt !== undefined ? body.capturedAt : null,
-            body.location !== undefined ? body.location : null,
-            body.event !== undefined ? body.event : null,
-            body.id
+        if (env.DB) {
+          await env.DB.prepare(
+            `UPDATE photos
+             SET caption = COALESCE(?, caption),
+                 tags = COALESCE(?, tags),
+                 captured_at = COALESCE(?, captured_at),
+                 location = COALESCE(?, location),
+                 event = COALESCE(?, event)
+             WHERE id = ?`
           )
-          .run();
+            .bind(
+              body.caption !== undefined ? body.caption : null,
+              body.tags !== undefined ? body.tags : null,
+              body.capturedAt !== undefined ? body.capturedAt : null,
+              body.location !== undefined ? body.location : null,
+              body.event !== undefined ? body.event : null,
+              body.id
+            )
+            .run();
+        }
         return json({ ok: true, id: body.id }, { headers: cors });
       }
 
-      // 7. Delete photo
+      // 8. Delete photo
       if (url.pathname === "/api/photos/delete" && request.method === "POST") {
         const body = await request.json().catch(() => ({}));
         const id = body.id || url.searchParams.get("id");
         if (!id) return json({ error: "id is required" }, { status: 400, headers: cors });
 
-        const row = await env.DB.prepare("SELECT r2_key, preview_key FROM photos WHERE id = ?")
-          .bind(id)
-          .first();
+        if (env.DB) {
+          const row = await env.DB.prepare("SELECT r2_key, preview_key FROM photos WHERE id = ?")
+            .bind(id)
+            .first();
 
-        if (row) {
-          if (env.MEDIA) {
-            if (row.r2_key) await env.MEDIA.delete(row.r2_key).catch(() => {});
-            if (row.preview_key) await env.MEDIA.delete(row.preview_key).catch(() => {});
+          if (row) {
+            if (env.MEDIA) {
+              if (row.r2_key) await env.MEDIA.delete(row.r2_key).catch(() => {});
+              if (row.preview_key) await env.MEDIA.delete(row.preview_key).catch(() => {});
+            }
+            await env.DB.prepare("DELETE FROM photos WHERE id = ?").bind(id).run();
           }
-          await env.DB.prepare("DELETE FROM photos WHERE id = ?").bind(id).run();
-          await env.DB.prepare("DELETE FROM photo_tags WHERE photo_id = ?").bind(id).run().catch(() => {});
         }
         return json({ ok: true, id }, { headers: cors });
       }
 
-      // 8. Uploads initialization (Dual-Key for Original & Preview WebP)
-      if (url.pathname === "/api/uploads" && request.method === "POST") {
-        const body = await request.json().catch(() => ({}));
-        if (!body.id || !body.mimeType) {
-          return json({ error: "id and mimeType are required" }, { status: 400, headers: cors });
-        }
-        const now = new Date();
-        const year = now.getUTCFullYear();
-        const month = String(now.getUTCMonth() + 1).padStart(2, "0");
-        const key = `photos/${year}/${month}/${body.id}/original`;
-        const previewKey = `photos/${year}/${month}/${body.id}/preview.webp`;
-
-        const uploadUrl = await signR2(env, key, "PUT", body.mimeType);
-        const previewUrl = await signR2(env, previewKey, "PUT", "image/webp");
-
-        await env.DB.prepare(
-          `INSERT INTO photos (
-            id, r2_key, preview_key, created_at, captured_at, caption,
-            tags, width, height, size_bytes, mime_type, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading')
-          ON CONFLICT(id) DO UPDATE SET status = 'uploading'`
-        )
-          .bind(
-            body.id,
-            key,
-            previewKey,
-            now.toISOString(),
-            body.capturedAt || null,
-            body.caption || null,
-            body.tags || null,
-            body.width || null,
-            body.height || null,
-            body.sizeBytes || null,
-            body.mimeType
-          )
-          .run();
-
-        return json({ id: body.id, key, previewKey, uploadUrl, previewUrl }, { headers: cors });
-      }
-
-      // 9. Upload complete
-      if (url.pathname === "/api/uploads/complete" && request.method === "POST") {
-        const body = await request.json().catch(() => ({}));
-        if (!body.id) return json({ error: "id is required" }, { status: 400, headers: cors });
-
-        await env.DB.prepare(
-          `UPDATE photos
-           SET status = 'ready',
-               size_bytes = COALESCE(?, size_bytes),
-               caption = COALESCE(?, caption),
-               tags = COALESCE(?, tags),
-               width = COALESCE(?, width),
-               height = COALESCE(?, height),
-               captured_at = COALESCE(?, captured_at)
-           WHERE id = ?`
-        )
-          .bind(
-            body.sizeBytes || null,
-            body.caption || null,
-            body.tags || null,
-            body.width || null,
-            body.height || null,
-            body.capturedAt || null,
-            body.id
-          )
-          .run();
-
-        return json({ ok: true, id: body.id }, { headers: cors });
-      }
-
-      // 10. Download Original High-Res Photo URL
+      // 9. Download original high-res photo stream
       if (url.pathname === "/api/download" && request.method === "GET") {
         const id = url.searchParams.get("id");
         if (!id) return json({ error: "id is required" }, { status: 400, headers: cors });
-        const row = await env.DB.prepare("SELECT r2_key FROM photos WHERE id = ?").bind(id).first();
+        if (!env.DB) return json({ error: "Database not available" }, { status: 500, headers: cors });
+
+        const row = await env.DB.prepare("SELECT r2_key, caption, mime_type FROM photos WHERE id = ?")
+          .bind(id)
+          .first();
+
         if (!row || !row.r2_key) return json({ error: "not found" }, { status: 404, headers: cors });
-        const signedUrl = await signR2(env, row.r2_key, "GET");
-        return json({ url: signedUrl }, { headers: cors });
+
+        if (env.MEDIA) {
+          const object = await env.MEDIA.get(row.r2_key);
+          if (!object) return json({ error: "Media file not found in storage" }, { status: 404, headers: cors });
+          const headers = new Headers();
+          object.writeHttpMetadata(headers);
+          const ext = row.mime_type === "image/png" ? ".png" : ".jpg";
+          const filename = (row.caption || `photo-${id}`).replace(/[^a-zA-Z0-9_-]/g, "_") + ext;
+          headers.set("content-disposition", `attachment; filename="${filename}"`);
+          headers.set("access-control-allow-origin", "*");
+          return new Response(object.body, { headers });
+        }
+        return json({ error: "Storage binding not available" }, { status: 500, headers: cors });
       }
 
       return new Response("Not found", { status: 404, headers: cors });
