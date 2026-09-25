@@ -10,7 +10,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "chabongspace-memory"
-database_id = "REPLACE_AFTER_CREATION"
+database_id = "90f8a731-a8c9-40f9-a6c9-ae0cef3af5bf"
 
 [[r2_buckets]]
 binding = "MEDIA"
