@@ -2,6 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { readImageMetadata, createImageTiers, optimizeUploadFile } from './utils/media.js';
+import {
+  getLocalPhotos,
+  getUploadJobs,
+  putLocalPhoto,
+  putUploadJob,
+  deleteUploadJob,
+  deleteLocalPhoto,
+  isLocalStoreAvailable
+} from './utils/localStore.js';
 
 const API = '/api';
 
@@ -157,6 +166,7 @@ function App() {
   const [dateTo, setDateTo] = useState('');
   const [camera, setCamera] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [zoom, setZoom] = useState(0.2);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [culledIds, setCulledIds] = useState(null);
@@ -173,6 +183,8 @@ function App() {
     pinchRef = useRef(null),
     lightboxTouchRef = useRef(null);
   const userInteracted = useRef(false);
+  const queueRunningRef = useRef(false);
+  const retryTimerRef = useRef(null);
 
   // Check auth session
   useEffect(() => {
@@ -186,6 +198,36 @@ function App() {
       })
       .catch(() => {});
   }, []);
+
+  function localRecordToPhoto(record) {
+    const canvasSrc = record.canvasBlob ? URL.createObjectURL(record.canvasBlob) : null;
+    const thumbSrc = record.thumbBlob ? URL.createObjectURL(record.thumbBlob) : canvasSrc;
+    const originalSrc = record.fileBlob ? URL.createObjectURL(record.fileBlob) : null;
+    return {
+      id: record.id,
+      src: canvasSrc,
+      thumbSrc,
+      originalSrc,
+      ratio: record.ratio || 1,
+      date: (record.capturedAt || record.createdAt || new Date().toISOString()).slice(0, 10),
+      tag: record.tags || 'upload',
+      caption: record.caption || '',
+      syncState: record.state || 'ready',
+      syncError: record.error || ''
+    };
+  }
+
+  async function hydrateLocalPhotos() {
+    if (!isLocalStoreAvailable()) return;
+    try {
+      const records = await getLocalPhotos();
+      const local = records
+        .filter((record) => record.state === 'pending' || record.state === 'uploading')
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(localRecordToPhoto);
+      if (local.length) setPhotos((current) => [...local, ...current.filter((p) => !local.some((x) => x.id === p.id))]);
+    } catch {}
+  }
 
   // Fetch photos from D1 database
   const loadPhotos = () => {
@@ -202,8 +244,7 @@ function App() {
       .then((res) => {
         const rows = res.photos || (Array.isArray(res) ? res : []);
         if (rows.length) {
-          setPhotos(
-            rows.map((p) => ({
+          const serverPhotos = rows.map((p) => ({
               ...p,
               src: (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
               thumbSrc: p.thumb_key ? '/media/' + p.thumb_key : (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
@@ -211,9 +252,20 @@ function App() {
               date: (p.captured_at || p.created_at || '').slice(0, 10),
               tag: p.tags || '',
               caption: p.caption || '',
-              ratio: p.width && p.height ? p.width / p.height : 1
-            }))
-          );
+              ratio: p.width && p.height ? p.width / p.height : 1,
+              syncState: 'ready'
+            }));
+          getLocalPhotos()
+            .then((records) => {
+              const pending = records
+                .filter((record) => record.state === 'pending' || record.state === 'uploading')
+                .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+                .map(localRecordToPhoto);
+              setPhotos([...pending, ...serverPhotos.filter((p) => !pending.some((x) => x.id === p.id))]);
+            })
+            .catch(() => setPhotos(serverPhotos));
+        } else {
+          hydrateLocalPhotos();
         }
       })
       .catch(() => {});
@@ -232,6 +284,7 @@ function App() {
 
   useEffect(() => {
     loadPhotos();
+    if (authed) hydrateLocalPhotos();
   }, [authed, query, activeFilter, dateFrom, dateTo]);
 
   // Client-side filtering fallback for demo mode
@@ -461,69 +514,147 @@ function App() {
     }
   }
 
-  // Tạo các tier riêng: original giữ nguyên, canvas ~1000px, thumb ~240px.
-  async function createUpload(rawFile) {
+  // Phase 5: local-first upload pipeline.
+  async function prepareUpload(rawFile) {
     const file = await optimizeUploadFile(rawFile);
     const id = crypto.randomUUID();
     const meta = await readImageMetadata(file);
     const { thumb, canvas } = await createImageTiers(file);
     const canvasBlob = canvas?.blob || null;
     const thumbBlob = thumb?.blob || null;
+    const caption = file.name.replace(/\.[^/.]+$/, '');
+    const createdAt = new Date().toISOString();
+
+    const record = {
+      id,
+      fileBlob: file,
+      thumbBlob,
+      canvasBlob,
+      width: meta.width,
+      height: meta.height,
+      ratio: meta.ratio || 1,
+      sizeBytes: file.size,
+      mimeType: file.type || 'image/jpeg',
+      caption,
+      tags: 'upload',
+      capturedAt: meta.capturedAt || createdAt,
+      createdAt,
+      state: 'pending',
+      attempt: 0,
+      error: ''
+    };
+
+    await putLocalPhoto(record);
+    await putUploadJob({
+      ...record,
+      updatedAt: createdAt
+    });
+    return localRecordToPhoto(record);
+  }
+
+  async function sendUploadJob(job) {
     const uploadName = (blob, fallback) => {
       if (!blob) return fallback;
       const ext = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'bin';
       return `${fallback}.${ext}`;
     };
-
     const formData = new FormData();
-    formData.append('file', file);
-    if (thumbBlob) formData.append('thumb', thumbBlob, uploadName(thumbBlob, 'thumb'));
-    if (canvasBlob) formData.append('canvas', canvasBlob, uploadName(canvasBlob, 'canvas'));
-    formData.append('id', id);
-    formData.append('caption', file.name.replace(/\.[^/.]+$/, ''));
-    formData.append('capturedAt', meta.capturedAt);
-    formData.append('width', String(meta.width));
-    formData.append('height', String(meta.height));
-    formData.append('sizeBytes', String(file.size));
-    formData.append('mimeType', file.type || 'image/jpeg');
+    formData.append('file', job.fileBlob, job.fileBlob.name || 'memory');
+    if (job.thumbBlob) formData.append('thumb', job.thumbBlob, uploadName(job.thumbBlob, 'thumb'));
+    if (job.canvasBlob) formData.append('canvas', job.canvasBlob, uploadName(job.canvasBlob, 'canvas'));
+    formData.append('id', job.id);
+    formData.append('caption', job.caption || '');
+    formData.append('tags', job.tags || '');
+    formData.append('capturedAt', job.capturedAt);
+    formData.append('width', String(job.width || ''));
+    formData.append('height', String(job.height || ''));
+    formData.append('sizeBytes', String(job.sizeBytes || job.fileBlob.size));
+    formData.append('mimeType', job.mimeType || job.fileBlob.type || 'image/jpeg');
 
     const res = await fetch(API + '/upload', {
       method: 'POST',
       credentials: 'include',
       body: formData
     });
-
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || 'Lỗi server (' + res.status + ')');
     }
+    return res.json();
+  }
 
-    const canvasUrl = canvasBlob ? URL.createObjectURL(canvasBlob) : URL.createObjectURL(file);
-    const thumbUrl = thumbBlob ? URL.createObjectURL(thumbBlob) : canvasUrl;
-    const originalUrl = URL.createObjectURL(file);
-    return {
-      id,
-      src: canvasUrl,
-      thumbSrc: thumbUrl,
-      originalSrc: originalUrl,
-      ratio: meta.ratio || 1,
-      date: (meta.capturedAt || new Date().toISOString()).slice(0, 10),
-      tag: 'upload',
-      caption: file.name.replace(/\.[^/.]+$/, '')
+  async function processUploadQueue() {
+    if (!isLocalStoreAvailable() || queueRunningRef.current || !authed) return;
+    queueRunningRef.current = true;
+    setSyncing(true);
+    try {
+      const jobs = await getUploadJobs();
+      for (const job of jobs.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
+        const attempt = Number(job.attempt || 0) + 1;
+        const uploading = { ...job, state: 'uploading', attempt, error: '', updatedAt: new Date().toISOString() };
+        await putUploadJob(uploading);
+        await putLocalPhoto(uploading);
+        setPhotos((current) => current.map((p) => p.id === job.id ? { ...p, syncState: 'uploading', syncError: '' } : p));
+
+        try {
+          const result = await sendUploadJob(uploading);
+          await deleteUploadJob(job.id);
+          const ready = { ...uploading, state: 'ready', error: '', serverKey: result.key, canvasKey: result.canvasKey, thumbKey: result.thumbKey };
+          await putLocalPhoto(ready);
+          setPhotos((current) => current.map((p) => p.id === job.id ? {
+            ...p,
+            syncState: 'ready',
+            syncError: '',
+            src: result.canvasKey ? '/media/' + result.canvasKey : p.src,
+            thumbSrc: result.thumbKey ? '/media/' + result.thumbKey : p.thumbSrc,
+            originalSrc: result.key ? '/media/' + result.key : p.originalSrc
+          } : p));
+        } catch (error) {
+          const failed = { ...uploading, state: 'pending', error: error.message || 'Upload failed', updatedAt: new Date().toISOString() };
+          await putUploadJob(failed);
+          await putLocalPhoto(failed);
+          setPhotos((current) => current.map((p) => p.id === job.id ? { ...p, syncState: 'pending', syncError: failed.error } : p));
+          if (!retryTimerRef.current) {
+            retryTimerRef.current = setTimeout(() => {
+              retryTimerRef.current = null;
+              processUploadQueue();
+            }, 5000);
+          }
+        }
+      }
+    } catch {} finally {
+      queueRunningRef.current = false;
+      setSyncing(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!authed) return;
+    processUploadQueue();
+    const onOnline = () => processUploadQueue();
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     };
+  }, [authed]);
+
+  async function queueUpload(rawFile) {
+    const item = await prepareUpload(rawFile);
+    setPhotos((current) => [item, ...current.filter((p) => p.id !== item.id)]);
+    processUploadQueue();
+    return item;
   }
 
   async function upload(e) {
     if (!e.target.files?.length) return;
     setBusy(true);
     try {
-      const added = [];
-      for (const f of [...e.target.files]) {
-        added.push(await createUpload(f));
+      for (const file of [...e.target.files]) {
+        await queueUpload(file);
       }
-      setPhotos((x) => [...added, ...x]);
     } catch (err) {
-      alert('Upload chưa hoàn tất: ' + (err.message || 'Lỗi'));
+      alert('Không thể lưu ảnh cục bộ: ' + (err.message || 'IndexedDB error'));
     } finally {
       setBusy(false);
       e.target.value = '';
@@ -577,8 +708,7 @@ function App() {
         }
         const file = new File([b], 'memory-' + Date.now() + '.jpg', { type: 'image/jpeg' });
         try {
-          const item = await createUpload(file);
-          setPhotos((x) => [item, ...x]);
+          await queueUpload(file);
           stopCamera();
         } catch (err) {
           alert('Không thể lưu ảnh: ' + (err.message || 'Lỗi không xác định'));
@@ -609,6 +739,10 @@ function App() {
         body: JSON.stringify({ id })
       });
     } catch {}
+    if (isLocalStoreAvailable()) {
+      deleteUploadJob(id).catch(() => {});
+      deleteLocalPhoto(id).catch(() => {});
+    }
     setPhotos((prev) => prev.filter((p) => p.id !== id));
     setSelected(null);
     setEditing(false);

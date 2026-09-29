@@ -41,6 +41,13 @@ Only photos intersecting the viewport + 700px prefetch margin are mounted.
 ## Important limitation
 The current environment does not provide a real browser performance trace for iPhone Safari, so FPS and memory figures must be collected manually on the actual target device/browser before declaring the performance target achieved.
 
+## Phase 5 local-first pipeline
+- IndexedDB stores the original file blob, thumb/canvas blobs, metadata, and sync state for local uploads.
+- Upload UI is optimistic: a selected/captured image is visible before the network request completes.
+- Failed uploads stay in the queue and retry after 5 seconds or on `online`.
+- Successful uploads reconcile local object URLs with server R2 media URLs.
+- Deleting a photo also removes its local IndexedDB record and queued job.
+
 ## Phase 4 image pipeline
 - `original`: uploaded without resize/re-encode, preserving the source MIME/type.
 - `canvas`: generated at a maximum dimension of 1000px for the collage/lightweight zoom path.

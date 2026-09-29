@@ -37,8 +37,8 @@ Target: `thumb` ~160–240px, `canvas` ~600–1000px, `original` in native sourc
 Implemented: upload now keeps the original file untouched, generates separate `thumb` (240px) and `canvas` (1000px) tiers, chooses the smaller WebP/JPEG encoder result, and falls back to the source when an encoded tier would be larger. D1 now stores `thumb_key` and `canvas_key`; legacy `preview_key` remains readable. The collage loads thumb first and promotes to canvas, while lightbox uses original.
 
 ## Phase 5 — Local-first
-**Status: ⬜**
-Add IndexedDB for photos, image blobs, upload queue, and sync state. Flow: capture/select → local processing → IndexedDB → UI immediately → upload queue.
+**Status: 🟩 Implemented**
+Added an IndexedDB layer for local photo records and upload jobs. File/camera uploads are processed locally first, written to IndexedDB, rendered immediately with `pending` sync state, then uploaded asynchronously. Failed jobs remain queued and retry after 5 seconds or when the browser comes back online; successful jobs reconcile to server R2 URLs. Local pending/uploading records are restored on reload.
 
 ## Phase 6 — Upload architecture
 **Status: ⬜**
