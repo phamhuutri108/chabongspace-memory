@@ -193,7 +193,7 @@ function parseCookie(request, name) {
 }
 
 async function isAuthorized(request, env) {
-  const secret = env.SESSION_SECRET;
+  const secret = env.AUTH_SECRET;
   if (!secret) return false;
   const authHeader = request.headers.get("authorization") || "";
   const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
@@ -239,13 +239,13 @@ export default {
 
       // 3. Auth endpoints
       if (url.pathname === "/api/auth/verify" && request.method === "POST") {
-        if (!env.AUTH_PASSWORD || !env.SESSION_SECRET) {
+        if (!env.ADMIN_PASSWORD || !env.AUTH_SECRET) {
           return json({ error: "Authentication is not configured" }, { status: 503, headers: cors });
         }
         const body = await request.json().catch(() => ({}));
-        const masterPassword = env.AUTH_PASSWORD;
+        const masterPassword = env.ADMIN_PASSWORD;
         if (body.password === masterPassword) {
-          const token = await signToken(env.SESSION_SECRET, Date.now());
+          const token = await signToken(env.AUTH_SECRET, Date.now());
           const cookieHeader = `memory_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}; Secure`;
           return json(
             { ok: true, token },
@@ -417,7 +417,7 @@ export default {
           body.hasThumb === false ? null : getPresignedPutUrl(env, keys.thumbKey, contentTypes.thumb),
           body.hasCanvas === false ? null : getPresignedPutUrl(env, keys.canvasKey, contentTypes.canvas)
         ]);
-        const planToken = await signUploadPlan(env.SESSION_SECRET, {
+        const planToken = await signUploadPlan(env.AUTH_SECRET, {
           id,
           exp: Date.now() + 60 * 60 * 1000,
           keys,
@@ -433,7 +433,7 @@ export default {
       // Commit D1 metadata only after direct R2 uploads are complete.
       if (url.pathname === "/api/upload/commit" && request.method === "POST") {
         const body = await request.json().catch(() => ({}));
-        const plan = await verifyUploadPlan(env.SESSION_SECRET, body.planToken);
+        const plan = await verifyUploadPlan(env.AUTH_SECRET, body.planToken);
         if (!plan) return json({ error: "Upload plan is invalid or expired" }, { status: 401, headers: cors });
         if (!env.MEDIA || !env.DB) return json({ error: "Storage or database is not configured" }, { status: 500, headers: cors });
         const keys = plan.keys || {};

@@ -17,11 +17,11 @@ This project does not automatically create production resources. Create a dedica
 Authentication is intentionally fail-closed. Production requires both secrets below; there is no built-in/default password.
 
 ```sh
-npx wrangler secret put AUTH_PASSWORD
-npx wrangler secret put SESSION_SECRET
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put AUTH_SECRET
 ```
 
-`SESSION_SECRET` should be a long random value and must not be committed to git. R2 direct uploads additionally require `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Worker secrets.
+`AUTH_SECRET` should be a long random value and must not be committed to git. R2 direct uploads additionally require `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Worker secrets.
 
 R2 bucket CORS is intentionally limited to the production gallery and local development origins in `r2-cors.json`. Quick Tunnel origins are no longer allowed by default; if temporary tunnel testing is required, add that exact origin temporarily and reset the CORS policy afterward.
 
