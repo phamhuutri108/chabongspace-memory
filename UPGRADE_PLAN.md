@@ -15,9 +15,9 @@ Nâng cấp theo từng checkpoint, không rewrite toàn bộ app cùng lúc.
 10. Security / migration / final benchmark
 
 ## Phase 1 — Performance baseline
-**Status: 🟨 Instrumentation + build baseline complete; real-device FPS benchmark pending**
+**Status: 🟨 Browser performance lab implemented; real-device measurements pending**
 
-Measure on 50 / 250 / 500 / 1000 photos: initial render, collage layout time, pan responsiveness, zoom/pinch responsiveness, mounted photo nodes, image decode/network load, memory usage.
+Measure on 50 / 250 / 500 / 1000 photos using the browser lab at `/?perf=1`: initial render, pan responsiveness, zoom/pinch responsiveness, mounted photo nodes, image decode/network load, and memory usage.
 See `docs/performance-baseline.md`.
 
 ## Phase 2 — Renderer isolation

@@ -9,11 +9,11 @@ Worker syntax check: `npm run verify`
 ## Current automated baseline
 - Vite production build: passed
 - Worker syntax check: passed
-- Production JS bundle: 240.86 kB
-- Gzipped JS bundle: 76.09 kB
-- Production CSS: 8.10 kB
-- Gzipped CSS: 2.37 kB
-- Build duration in current environment: ~75 ms
+- Production JS bundle: 254.42 kB
+- Gzipped JS bundle: 79.78 kB
+- Production CSS: 9.97 kB
+- Gzipped CSS: 2.73 kB
+- Build duration in current environment: ~85 ms
 
 These numbers measure build output, not browser runtime performance.
 
@@ -25,7 +25,19 @@ These numbers measure build output, not browser runtime performance.
 | 250 | pending | pending | pending | pending | pending |
 | 500 | pending | pending | pending | pending | pending |
 | 1000 | pending | pending | pending | pending | pending |
-| 2000 | pending | pending | pending | pending | pending |
+
+The Phase 1 browser lab is available at `/?perf=1`. It generates synthetic 50 / 250 / 500 / 1000-photo datasets inside the real gallery renderer and exposes repeatable measurements for initial render, 5-second pan/zoom animation FPS, mounted photo nodes, image loading and JS heap when the browser exposes `performance.memory`.
+
+### Measurement procedure
+1. Open the production or local gallery with `?perf=1` on the target browser/device.
+2. Select 50, 250, 500 and 1000 photos one at a time and wait for the initial-render value to settle.
+3. Run `Measure pan · 5s` and `Measure zoom · 5s` for each dataset. Keep the device otherwise idle.
+4. Run `Measure image load` after each dataset to capture image-resource loading cost. Resource timing may omit transfer sizes on cross-origin images without timing permission.
+5. Record mounted photo count from the panel. This is the number of `.perf-photo` nodes actually mounted after viewport culling.
+6. On Chromium, record JS heap from the panel. Safari does not expose `performance.memory`, so use Safari Web Inspector's Timelines/Memory tools for the memory column.
+7. Repeat the full matrix at least once after a cold page load and once after a warm reload; use the warm/cold distinction in notes rather than averaging them together.
+
+The lab's pan/zoom FPS is a controlled `requestAnimationFrame` stress animation, not a claim about every possible user gesture. For final Phase 1 sign-off, the measured values must be collected on the actual target browser/device.
 
 ## Phase 10 synthetic benchmark
 

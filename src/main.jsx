@@ -150,6 +150,180 @@ function buildCollage(items) {
   return { items: items.map((item) => map.get(item.id)), bounds };
 }
 
+function PerformanceLab() {
+  const datasets = [50, 250, 500, 1000];
+  const [size, setSize] = useState(50);
+  const [photos, setPhotos] = useState(() => createPerformancePhotos(50));
+  const [metrics, setMetrics] = useState({
+    initialMs: null,
+    panFps: null,
+    zoomFps: null,
+    mounted: 0,
+    imageCount: 0,
+    imageMs: null,
+    memoryMb: null
+  });
+  const [running, setRunning] = useState(false);
+  const viewportRef = useRef(null);
+  const worldRef = useRef(null);
+  const frameRef = useRef(null);
+  const animationRef = useRef(null);
+  const startRef = useRef(0);
+
+  const layout = useMemo(() => buildCollage(photos), [photos]);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(0.2);
+
+  useEffect(() => {
+    const start = performance.now();
+    setPhotos(createPerformancePhotos(size));
+    setMetrics((current) => ({ ...current, initialMs: null }));
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const mounted = worldRef.current?.querySelectorAll('.perf-photo').length || 0;
+        setMetrics((current) => ({ ...current, initialMs: performance.now() - start, mounted }));
+      });
+    });
+  }, [size]);
+
+  useEffect(() => {
+    if (!layout.items.length || !viewportRef.current) return;
+    const update = () => {
+      const viewport = viewportRef.current;
+      const ids = getViewportPhotoIds(layout.items, zoom, offset, viewport.clientWidth, viewport.clientHeight);
+      const mounted = worldRef.current?.querySelectorAll('.perf-photo').length || ids.size;
+      setMetrics((current) => ({ ...current, mounted }));
+    };
+    requestAnimationFrame(update);
+  }, [layout, offset, zoom]);
+
+  useEffect(() => () => {
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+  }, []);
+
+  function runMotion(kind) {
+    if (running) return;
+    setRunning(true);
+    const duration = 5000;
+    const start = performance.now();
+    let frames = 0;
+    let last = start;
+    let elapsedFrameMs = 0;
+
+    const tick = (now) => {
+      frames += 1;
+      elapsedFrameMs += now - last;
+      last = now;
+      const progress = Math.min(1, (now - start) / duration);
+      const phase = progress * Math.PI * 10;
+      const nextOffset = { x: Math.sin(phase) * 700, y: Math.cos(phase * 0.7) * 500 };
+      const nextZoom = kind === 'zoom' ? 0.16 + (Math.sin(phase) + 1) * 0.18 : 0.2;
+      if (worldRef.current) {
+        worldRef.current.style.transform = `translate3d(${nextOffset.x}px,${nextOffset.y}px,0) scale(${nextZoom})`;
+      }
+      if (progress < 1) {
+        animationRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const avgFrameMs = frames > 1 ? elapsedFrameMs / (frames - 1) : 1000 / 60;
+      setMetrics((current) => ({
+        ...current,
+        [kind === 'zoom' ? 'zoomFps' : 'panFps']: Math.min(60, 1000 / avgFrameMs)
+      }));
+      setRunning(false);
+    };
+    animationRef.current = requestAnimationFrame(tick);
+  }
+
+  async function measureImages() {
+    const urls = photos.slice(0, Math.min(30, photos.length)).map((photo) => photo.src);
+    const start = performance.now();
+    await Promise.all(urls.map((src) => new Promise((resolve) => {
+      const image = new Image();
+      image.decoding = 'async';
+      image.onload = () => resolve();
+      image.onerror = () => resolve();
+      image.src = src;
+    })));
+    const resources = performance.getEntriesByType('resource').filter((entry) => entry.initiatorType === 'img');
+    setMetrics((current) => ({
+      ...current,
+      imageCount: resources.length,
+      imageMs: performance.now() - start
+    }));
+  }
+
+  const memoryMb = typeof performance !== 'undefined' && performance.memory
+    ? performance.memory.usedJSHeapSize / 1024 / 1024
+    : null;
+
+  return (
+    <main className="perf-lab">
+      <aside className="perf-panel">
+        <div className="eyebrow">CHÀ BÔNG SPACE · PERFORMANCE LAB</div>
+        <h1>Phase 1</h1>
+        <p className="perf-note">Real browser benchmark. Run this on the target device/browser and record the results below.</p>
+        <div className="perf-datasets">
+          {datasets.map((count) => (
+            <button key={count} className={size === count ? 'active' : ''} onClick={() => setSize(count)} disabled={running}>
+              {count}
+            </button>
+          ))}
+        </div>
+        <div className="perf-actions">
+          <button onClick={() => runMotion('panFps')} disabled={running}>Measure pan · 5s</button>
+          <button onClick={() => runMotion('zoomFps')} disabled={running}>Measure zoom · 5s</button>
+          <button onClick={measureImages} disabled={running}>Measure image load</button>
+        </div>
+        <dl className="perf-metrics">
+          <div><dt>Dataset</dt><dd>{size}</dd></div>
+          <div><dt>Initial render</dt><dd>{metrics.initialMs == null ? '—' : `${metrics.initialMs.toFixed(1)} ms`}</dd></div>
+          <div><dt>Pan FPS</dt><dd>{metrics.panFps == null ? '—' : metrics.panFps.toFixed(1)}</dd></div>
+          <div><dt>Zoom FPS</dt><dd>{metrics.zoomFps == null ? '—' : metrics.zoomFps.toFixed(1)}</dd></div>
+          <div><dt>Mounted photos</dt><dd>{metrics.mounted}</dd></div>
+          <div><dt>Image load</dt><dd>{metrics.imageMs == null ? '—' : `${metrics.imageMs.toFixed(1)} ms`}</dd></div>
+          <div><dt>Image resources</dt><dd>{metrics.imageCount || '—'}</dd></div>
+          <div><dt>JS heap</dt><dd>{memoryMb == null ? 'Safari/unsupported' : `${memoryMb.toFixed(1)} MB`}</dd></div>
+        </dl>
+        <button className="perf-back" onClick={() => { window.location.href = window.location.pathname; }}>Back to gallery</button>
+      </aside>
+      <section ref={viewportRef} className="perf-viewport">
+        <div
+          ref={worldRef}
+          className="perf-world"
+          style={{ transform: `translate3d(${offset.x}px,${offset.y}px,0) scale(${zoom})` }}
+        >
+          {photos.map((photo, index) => {
+            const pos = layout.items[index];
+            if (!pos) return null;
+            const ids = getViewportPhotoIds(layout.items, zoom, offset, window.innerWidth, window.innerHeight);
+            if (!ids.has(photo.id)) return null;
+            return (
+              <article key={photo.id} className="perf-photo" style={{ left: pos.x, top: pos.y, width: pos.w }}>
+                <img src={photo.src} loading="lazy" decoding="async" alt="performance test" />
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function createPerformancePhotos(count) {
+  return Array.from({ length: count }, (_, i) => {
+    const width = 600 + ((i * 37) % 500);
+    const height = 400 + ((i * 53) % 600);
+    return {
+      id: `perf-${count}-${i}`,
+      ratio: width / height,
+      src: `https://picsum.photos/seed/chabong-perf-${i % 120}/${width}/${height}`,
+      caption: `Performance ${i + 1}`
+    };
+  });
+}
+
 function App() {
   const [authed, setAuthed] = useState(() => sessionStorage.getItem('memory-auth') === '1');
   const [password, setPassword] = useState('');
@@ -1373,4 +1547,9 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('app')).render(<App />);
+function Root() {
+  const performanceMode = new URLSearchParams(window.location.search).get('perf') === '1';
+  return performanceMode ? <PerformanceLab /> : <App />;
+}
+
+createRoot(document.getElementById('app')).render(<Root />);

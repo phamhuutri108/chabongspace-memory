@@ -83,6 +83,25 @@ header>*{pointer-events:auto}
 .camera .icon-button{width:48px;height:48px}
 .camera .icon-button:first-child{background:#fff}
 
+/* Phase 1 browser performance lab: open ?perf=1 */
+.perf-lab{width:100%;height:100%;overflow:hidden;background:#fff;color:#171717}
+.perf-panel{position:fixed;z-index:10;top:18px;left:18px;width:min(330px,calc(100vw - 36px));padding:18px;border:1px solid #ddd;border-radius:16px;background:rgba(255,255,255,.94);box-shadow:0 16px 50px rgba(0,0,0,.1);backdrop-filter:blur(18px)}
+.perf-panel h1{font:42px/1 'DM Serif Display';font-weight:400;margin:8px 0}
+.perf-note{color:#777;font-size:10px;line-height:1.6;margin:0 0 14px}
+.perf-datasets{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}
+.perf-datasets button,.perf-actions button,.perf-back{border:1px solid #ddd;border-radius:9px;background:#fff;padding:8px 7px;font-size:10px}
+.perf-datasets button.active{background:#171717;color:#fff;border-color:#171717}
+.perf-actions{display:grid;gap:6px}
+.perf-actions button{text-align:left}
+.perf-actions button:disabled{opacity:.45}
+.perf-metrics{display:grid;gap:0;margin:14px 0 0;border-top:1px solid #eee}
+.perf-metrics div{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #eee;font-size:10px}
+.perf-metrics dt{color:#888}.perf-metrics dd{margin:0;font-weight:700;text-align:right}
+.perf-back{width:100%;margin-top:12px;text-align:center}
+.perf-viewport{position:fixed;inset:0;overflow:hidden;touch-action:none;background:#fff}
+.perf-world{position:absolute;left:0;top:0;width:4200px;height:2900px;transform-origin:0 0;will-change:transform}
+.perf-photo{position:absolute}.perf-photo img{display:block;width:100%;height:auto;object-fit:cover;box-shadow:0 7px 18px rgba(0,0,0,.13);border-radius:2px}
+
 @media(max-width:760px){
  header{padding:18px 16px}
  .actions{right:14px;bottom:16px;gap:8px}
