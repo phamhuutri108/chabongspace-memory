@@ -9,6 +9,7 @@ import {
   putUploadJob,
   deleteUploadJob,
   deleteLocalPhoto,
+  getCachedGalleryPhotos,
   isLocalStoreAvailable
 } from './utils/localStore.js';
 
@@ -172,6 +173,7 @@ function App() {
   const [culledIds, setCulledIds] = useState(null);
   const [hasMorePhotos, setHasMorePhotos] = useState(false);
   const [loadingMorePhotos, setLoadingMorePhotos] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine);
 
   const fileRef = useRef(),
     videoRef = useRef(),
@@ -209,11 +211,14 @@ function App() {
     const canvasSrc = record.canvasBlob ? URL.createObjectURL(record.canvasBlob) : null;
     const thumbSrc = record.thumbBlob ? URL.createObjectURL(record.thumbBlob) : canvasSrc;
     const originalSrc = record.fileBlob ? URL.createObjectURL(record.fileBlob) : null;
+    const remoteCanvasSrc = record.canvasKey ? '/media/' + record.canvasKey : null;
+    const remoteThumbSrc = record.thumbKey ? '/media/' + record.thumbKey : remoteCanvasSrc;
+    const remoteOriginalSrc = record.serverKey ? '/media/' + record.serverKey : null;
     return {
       id: record.id,
-      src: canvasSrc,
-      thumbSrc,
-      originalSrc,
+      src: canvasSrc || remoteCanvasSrc,
+      thumbSrc: thumbSrc || remoteThumbSrc,
+      originalSrc: originalSrc || remoteOriginalSrc,
       ratio: record.ratio || 1,
       date: (record.capturedAt || record.createdAt || new Date().toISOString()).slice(0, 10),
       tag: record.tags || 'upload',
@@ -228,10 +233,13 @@ function App() {
     try {
       const records = await getLocalPhotos();
       const local = records
-        .filter((record) => record.state === 'pending' || record.state === 'uploading')
+        .filter((record) => record.state === 'pending' || record.state === 'uploading' || record.state === 'ready')
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
         .map(localRecordToPhoto);
-      if (local.length) setPhotos((current) => [...local, ...current.filter((p) => !local.some((x) => x.id === p.id))]);
+      if (local.length) setPhotos((current) => {
+        const localIds = new Set(local.map((x) => x.id));
+        return [...local, ...current.filter((p) => !localIds.has(p.id))];
+      });
     } catch {}
   }
 
@@ -280,14 +288,58 @@ function App() {
             setPhotos([...pending, ...serverPhotos.filter((p) => !pending.some((x) => x.id === p.id))]);
           })
           .catch(() => setPhotos(serverPhotos));
+        for (const photo of serverPhotos) {
+          const existing = {
+            id: photo.id,
+            serverKey: photo.r2_key,
+            canvasKey: photo.canvas_key || photo.preview_key || '',
+            thumbKey: photo.thumb_key || photo.canvas_key || photo.preview_key || '',
+            capturedAt: photo.captured_at || photo.created_at,
+            createdAt: photo.created_at,
+            caption: photo.caption || '',
+            tags: photo.tags || '',
+            width: photo.width,
+            height: photo.height,
+            ratio: photo.width && photo.height ? photo.width / photo.height : 1,
+            state: 'ready',
+            error: ''
+          };
+          putLocalPhoto(existing).catch(() => {});
+        }
         if (!rows.length) hydrateLocalPhotos();
       } else if (serverPhotos.length) {
         setPhotos((current) => {
           const existing = new Set(current.map((p) => p.id));
           return [...current, ...serverPhotos.filter((p) => !existing.has(p.id))];
         });
+        for (const photo of serverPhotos) {
+          putLocalPhoto({
+            id: photo.id,
+            serverKey: photo.r2_key,
+            canvasKey: photo.canvas_key || photo.preview_key || '',
+            thumbKey: photo.thumb_key || photo.canvas_key || photo.preview_key || '',
+            capturedAt: photo.captured_at || photo.created_at,
+            createdAt: photo.created_at,
+            caption: photo.caption || '',
+            tags: photo.tags || '',
+            width: photo.width,
+            height: photo.height,
+            ratio: photo.width && photo.height ? photo.width / photo.height : 1,
+            state: 'ready',
+            error: ''
+          }).catch(() => {});
+        }
       }
-    } catch {}
+    } catch {
+      if (reset) {
+        try {
+          const cached = await getCachedGalleryPhotos();
+          const cachedPhotos = cached.map(localRecordToPhoto);
+          if (cachedPhotos.length) setPhotos(cachedPhotos);
+          setHasMorePhotos(false);
+        } catch {}
+      }
+    }
     finally {
       if (requestId === paginationRequestRef.current) {
         paginationLoadingRef.current = false;
@@ -302,6 +354,22 @@ function App() {
     loadPhotos({ reset: true });
     if (authed) hydrateLocalPhotos();
   }, [authed, query, activeFilter, dateFrom, dateTo]);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!authed) return;
@@ -700,6 +768,10 @@ function App() {
 
   async function processUploadQueue() {
     if (!isLocalStoreAvailable() || queueRunningRef.current || !authed) return;
+    if (!navigator.onLine) {
+      setSyncing(false);
+      return;
+    }
     queueRunningRef.current = true;
     setSyncing(true);
     try {
@@ -753,6 +825,10 @@ function App() {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     };
   }, [authed]);
+
+  useEffect(() => {
+    if (isOnline && authed) processUploadQueue();
+  }, [isOnline, authed]);
 
   async function queueUpload(rawFile) {
     const item = await prepareUpload(rawFile);
@@ -942,6 +1018,10 @@ function App() {
     <main className="app">
       <header>
         <div className="count">{visible.length} memories</div>
+        <div className={`connection-state ${isOnline ? 'online' : 'offline'}`} aria-live="polite">
+          <span className="connection-dot" />
+          {isOnline ? (syncing ? 'syncing' : 'online') : 'offline · saved locally'}
+        </div>
       </header>
 
       <div className="canvas-controls">

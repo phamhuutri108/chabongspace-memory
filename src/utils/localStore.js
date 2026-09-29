@@ -93,3 +93,8 @@ export async function clearLocalMemory() {
 export function isLocalStoreAvailable() {
   return typeof indexedDB !== 'undefined';
 }
+
+export async function getCachedGalleryPhotos() {
+  const records = await getLocalPhotos();
+  return records.filter((record) => record.state === 'ready' && (record.serverKey || record.r2Key));
+}

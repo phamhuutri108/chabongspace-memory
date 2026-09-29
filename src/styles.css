@@ -23,6 +23,9 @@ button{cursor:pointer}
 header{position:fixed;z-index:20;left:0;right:0;top:0;display:flex;justify-content:space-between;align-items:flex-start;padding:24px 28px;pointer-events:none;background:linear-gradient(#fff,rgba(255,255,255,0))}
 header>*{pointer-events:auto}
 .count{font-size:12px;letter-spacing:.08em;color:#666}
+.connection-state{position:fixed;top:16px;right:20px;z-index:20;display:flex;align-items:center;gap:7px;font-size:11px;letter-spacing:.02em;opacity:.72;pointer-events:none}
+.connection-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.connection-state.offline{opacity:.9}
 .header-actions{display:flex;gap:10px;align-items:center}
 .actions{position:fixed;z-index:22;right:24px;bottom:24px;display:flex;flex-direction:column;gap:8px}
 .toolbar{position:fixed;z-index:50;top:24px;right:28px;left:auto;display:flex;align-items:flex-start;pointer-events:none}.toolbar>*{pointer-events:auto}

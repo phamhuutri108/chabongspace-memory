@@ -49,8 +49,8 @@ Browser upload jobs now request a signed upload plan from the Worker, PUT origin
 The photo API now uses stable cursor pagination with a `(captured_at/created_at, id)` tie-breaker. The gallery loads 100 records initially and appends the next page when the viewport reaches the loaded tail. Nearby canvas tiers are prefetched around mounted photos, and the lightbox preloads previous/current/next originals. Existing filters are preserved across pages.
 
 ## Phase 8 — Offline
-**Status: ⬜**
-Local gallery offline, queued uploads offline, sync on reconnect, optional Service Worker after IndexedDB is stable.
+**Status: 🟩 Implemented**
+The gallery caches server photo metadata in IndexedDB and falls back to the cached gallery when the API is unavailable. The existing local-first upload queue now explicitly pauses while offline and resumes on reconnect. A Service Worker uses a cache-first strategy for `/media/` responses so previously viewed thumbnails/canvas/original assets can remain available offline. The UI exposes the current online/offline state while preserving optimistic local uploads.
 
 ## Phase 9 — Native iOS camera
 **Status: ⬜**
