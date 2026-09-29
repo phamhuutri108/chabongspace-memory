@@ -52,6 +52,8 @@ async function ensureDb(env) {
     `).run();
     await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_photos_created_at ON photos(created_at);").run().catch(() => {});
     await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_photos_captured_at ON photos(captured_at);").run().catch(() => {});
+    await env.DB.prepare("ALTER TABLE photos ADD COLUMN thumb_key TEXT;").run().catch(() => {});
+    await env.DB.prepare("ALTER TABLE photos ADD COLUMN canvas_key TEXT;").run().catch(() => {});
     dbInitialized = true;
   } catch (e) {
     console.error("DB initialization error:", e);
@@ -250,7 +252,7 @@ export default {
         }
 
         const sql = `
-          SELECT id, r2_key, preview_key, created_at, captured_at, caption,
+          SELECT id, r2_key, preview_key, thumb_key, canvas_key, created_at, captured_at, caption,
                  location, event, person, pet, ai_labels, tags, width, height,
                  size_bytes, mime_type, status
           FROM photos
@@ -277,7 +279,8 @@ export default {
         }
         const formData = await request.formData();
         const file = formData.get("file");
-        const preview = formData.get("preview");
+        const thumb = formData.get("thumb");
+        const canvas = formData.get("canvas");
         const id = formData.get("id") || crypto.randomUUID();
         const caption = formData.get("caption") || "";
         const tags = formData.get("tags") || "";
@@ -295,16 +298,27 @@ export default {
         const year = now.getUTCFullYear();
         const month = String(now.getUTCMonth() + 1).padStart(2, "0");
         const key = `photos/${year}/${month}/${id}/original`;
-        const previewKey = `photos/${year}/${month}/${id}/preview.webp`;
+        const thumbKey = thumb
+          ? `photos/${year}/${month}/${id}/thumb.${thumb.type === "image/jpeg" ? "jpg" : "webp"}`
+          : null;
+        const canvasKey = canvas
+          ? `photos/${year}/${month}/${id}/canvas.${canvas.type === "image/jpeg" ? "jpg" : "webp"}`
+          : null;
 
         // Upload directly into R2
         await env.MEDIA.put(key, file.stream(), {
           httpMetadata: { contentType: mimeType }
         });
 
-        if (preview && typeof preview.stream === "function") {
-          await env.MEDIA.put(previewKey, preview.stream(), {
-            httpMetadata: { contentType: "image/webp" }
+        if (thumb && typeof thumb.stream === "function") {
+          await env.MEDIA.put(thumbKey, thumb.stream(), {
+            httpMetadata: { contentType: thumb.type || "image/webp" }
+          });
+        }
+
+        if (canvas && typeof canvas.stream === "function") {
+          await env.MEDIA.put(canvasKey, canvas.stream(), {
+            httpMetadata: { contentType: canvas.type || "image/webp" }
           });
         }
 
@@ -312,12 +326,14 @@ export default {
         if (env.DB) {
           await env.DB.prepare(
             `INSERT INTO photos (
-              id, r2_key, preview_key, created_at, captured_at, caption,
+              id, r2_key, preview_key, thumb_key, canvas_key, created_at, captured_at, caption,
               tags, width, height, size_bytes, mime_type, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
             ON CONFLICT(id) DO UPDATE SET
               r2_key = excluded.r2_key,
-              preview_key = excluded.preview_key,
+              preview_key = COALESCE(excluded.canvas_key, excluded.preview_key),
+              thumb_key = excluded.thumb_key,
+              canvas_key = excluded.canvas_key,
               status = 'ready',
               width = COALESCE(excluded.width, photos.width),
               height = COALESCE(excluded.height, photos.height),
@@ -326,7 +342,9 @@ export default {
             .bind(
               id,
               key,
-              previewKey,
+              canvasKey,
+              thumbKey,
+              canvasKey,
               now.toISOString(),
               capturedAt,
               caption || null,
@@ -344,7 +362,8 @@ export default {
             ok: true,
             id,
             key,
-            previewKey,
+            canvasKey,
+            thumbKey,
             caption,
             capturedAt,
             width,
@@ -388,7 +407,7 @@ export default {
         if (!id) return json({ error: "id is required" }, { status: 400, headers: cors });
 
         if (env.DB) {
-          const row = await env.DB.prepare("SELECT r2_key, preview_key FROM photos WHERE id = ?")
+          const row = await env.DB.prepare("SELECT r2_key, preview_key, thumb_key, canvas_key FROM photos WHERE id = ?")
             .bind(id)
             .first();
 
@@ -396,6 +415,8 @@ export default {
             if (env.MEDIA) {
               if (row.r2_key) await env.MEDIA.delete(row.r2_key).catch(() => {});
               if (row.preview_key) await env.MEDIA.delete(row.preview_key).catch(() => {});
+              if (row.thumb_key && row.thumb_key !== row.preview_key) await env.MEDIA.delete(row.thumb_key).catch(() => {});
+              if (row.canvas_key && row.canvas_key !== row.preview_key) await env.MEDIA.delete(row.canvas_key).catch(() => {});
             }
             await env.DB.prepare("DELETE FROM photos WHERE id = ?").bind(id).run();
           }

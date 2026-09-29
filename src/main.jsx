@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { readImageMetadata, createWebpPreview, optimizeUploadFile } from './utils/media.js';
+import { readImageMetadata, createImageTiers, optimizeUploadFile } from './utils/media.js';
 
 const API = '/api';
 
@@ -66,37 +66,25 @@ const demo = Array.from({ length: 50 }, (_, i) => {
 
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 
-function collision(a, b, gap = 32) {
-  return !(a.x + a.w + gap <= b.x || b.x + b.w + gap <= a.x || a.y + a.h + gap <= b.y || b.y + b.h + gap <= a.y);
+function getViewportPhotoIds(items, zoom, offset, viewportWidth, viewportHeight, margin = 700) {
+  if (!items.length || !viewportWidth || !viewportHeight) return new Set(items.map((item) => item.id));
+  const safeZoom = Math.max(zoom, 0.0001);
+  const left = (-offset.x - margin) / safeZoom;
+  const top = (-offset.y - margin) / safeZoom;
+  const right = (viewportWidth - offset.x + margin) / safeZoom;
+  const bottom = (viewportHeight - offset.y + margin) / safeZoom;
+  const ids = new Set();
+  for (const item of items) {
+    if (item.x < right && item.x + item.w > left && item.y < bottom && item.y + item.h > top) ids.add(item.id);
+  }
+  return ids;
 }
 
-function pushApart(rects, gap = 32) {
-  for (let pass = 0; pass < 18; pass++) {
-    let moved = false;
-    for (let i = 0; i < rects.length; i++) {
-      for (let j = i + 1; j < rects.length; j++) {
-        const a = rects[i],
-          b = rects[j];
-        if (!collision(a, b, gap)) continue;
-        const overlapX = Math.min(a.x + a.w + gap - b.x, b.x + b.w + gap - a.x);
-        const overlapY = Math.min(a.y + a.h + gap - b.y, b.y + b.h + gap - a.y);
-        if (overlapX < overlapY) {
-          const dir = a.x + a.w / 2 < b.x + b.w / 2 ? -1 : 1;
-          const d = overlapX / 2;
-          a.x += dir * d;
-          b.x -= dir * d;
-        } else {
-          const dir = a.y + a.h / 2 < b.y + b.h / 2 ? -1 : 1;
-          const d = overlapY / 2;
-          a.y += dir * d;
-          b.y -= dir * d;
-        }
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  return rects;
+function sameIdSet(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
 }
 
 function buildCollage(items) {
@@ -141,8 +129,6 @@ function buildCollage(items) {
     y += Math.max(...heights) + rowGap;
   });
 
-  pushApart(rects, gap);
-
   const minX = Math.min(...rects.map((r) => r.x)),
     minY = Math.min(...rects.map((r) => r.y));
   const maxX = Math.max(...rects.map((r) => r.x + r.w)),
@@ -173,13 +159,19 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [zoom, setZoom] = useState(0.2);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [culledIds, setCulledIds] = useState(null);
 
   const fileRef = useRef(),
     videoRef = useRef(),
-    streamRef = useRef();
+    streamRef = useRef(),
+    viewportRef = useRef(null),
+    worldRef = useRef(null),
+    transformRef = useRef({ zoom: 0.2, offset: { x: 0, y: 0 } }),
+    cullFrameRef = useRef(null);
   const pointers = useRef(new Map()),
     panRef = useRef(null),
-    pinchRef = useRef(null);
+    pinchRef = useRef(null),
+    lightboxTouchRef = useRef(null);
   const userInteracted = useRef(false);
 
   // Check auth session
@@ -213,7 +205,9 @@ function App() {
           setPhotos(
             rows.map((p) => ({
               ...p,
-              src: p.preview_key ? '/media/' + p.preview_key : null,
+              src: (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
+              thumbSrc: p.thumb_key ? '/media/' + p.thumb_key : (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
+              originalSrc: p.r2_key ? '/media/' + p.r2_key : null,
               date: (p.captured_at || p.created_at || '').slice(0, 10),
               tag: p.tags || '',
               caption: p.caption || '',
@@ -258,6 +252,48 @@ function App() {
 
   const layout = useMemo(() => buildCollage(visible), [visible]);
 
+  function applyTransform(nextZoom, nextOffset) {
+    const next = {
+      zoom: clamp(nextZoom, 0.035, 4),
+      offset: { x: nextOffset.x, y: nextOffset.y }
+    };
+    transformRef.current = next;
+    if (worldRef.current) {
+      worldRef.current.style.transform =
+        `translate3d(${next.offset.x}px,${next.offset.y}px,0) scale(${next.zoom})`;
+    }
+    return next;
+  }
+
+  function scheduleViewportCull(items = layout.items) {
+    if (cullFrameRef.current) return;
+    cullFrameRef.current = requestAnimationFrame(() => {
+      cullFrameRef.current = null;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const current = transformRef.current;
+      const nextIds = getViewportPhotoIds(
+        items,
+        current.zoom,
+        current.offset,
+        viewport.clientWidth,
+        viewport.clientHeight
+      );
+      setCulledIds((previous) => (sameIdSet(previous, nextIds) ? previous : nextIds));
+    });
+  }
+
+  useEffect(() => {
+    setCulledIds(null);
+    scheduleViewportCull(layout.items);
+    return () => {
+      if (cullFrameRef.current) {
+        cancelAnimationFrame(cullFrameRef.current);
+        cullFrameRef.current = null;
+      }
+    };
+  }, [layout]);
+
   function fitLayout(nextLayout = layout) {
     if (!nextLayout.items.length) return;
     const vw = window.innerWidth,
@@ -265,8 +301,11 @@ function App() {
     const marginX = 48,
       marginY = 150;
     const z = clamp(Math.min((vw - marginX * 2) / nextLayout.bounds.w, (vh - marginY * 2) / nextLayout.bounds.h), 0.035, 1.25);
+    const nextOffset = { x: (vw - nextLayout.bounds.w * z) / 2, y: (vh - nextLayout.bounds.h * z) / 2 + 45 };
+    applyTransform(z, nextOffset);
     setZoom(z);
-    setOffset({ x: (vw - nextLayout.bounds.w * z) / 2, y: (vh - nextLayout.bounds.h * z) / 2 + 45 });
+    setOffset(nextOffset);
+    scheduleViewportCull(nextLayout.items);
   }
 
   useEffect(() => {
@@ -337,10 +376,15 @@ function App() {
     const z = clampZoom(next),
       rect = document.querySelector('.viewport')?.getBoundingClientRect();
     if (!rect) return;
+    const current = transformRef.current;
     const px = clientX - rect.left,
       py = clientY - rect.top;
-    setOffset((o) => ({ x: px - (px - o.x) * (z / zoom), y: py - (py - o.y) * (z / zoom) }));
-    setZoom(z);
+    const nextOffset = {
+      x: px - (px - current.offset.x) * (z / current.zoom),
+      y: py - (py - current.offset.y) * (z / current.zoom)
+    };
+    applyTransform(z, nextOffset);
+    scheduleViewportCull();
   }
 
   function onWheel(e) {
@@ -354,14 +398,19 @@ function App() {
     e.currentTarget.setPointerCapture(e.pointerId);
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.current.size === 1) {
-      panRef.current = { x: e.clientX, y: e.clientY, startX: offset.x, startY: offset.y };
+      panRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        startX: transformRef.current.offset.x,
+        startY: transformRef.current.offset.y
+      };
     } else if (pointers.current.size === 2) {
       const pts = [...pointers.current.values()];
       pinchRef.current = {
         distance: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
-        zoom,
+        zoom: transformRef.current.zoom,
         midpoint: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
-        startOffset: { ...offset }
+        startOffset: { ...transformRef.current.offset }
       };
       panRef.current = null;
     }
@@ -381,19 +430,22 @@ function App() {
       const start = { ...pinchRef.current };
       const worldX = (start.midpoint.x - start.startOffset.x) / start.zoom;
       const worldY = (start.midpoint.y - start.startOffset.y) / start.zoom;
-      setZoom(nextZoom);
-      setOffset({
+      const nextOffset = {
         x: midpoint.x - worldX * nextZoom,
         y: midpoint.y - worldY * nextZoom
-      });
+      };
+      applyTransform(nextZoom, nextOffset);
+      scheduleViewportCull();
       return;
     }
 
     if (panRef.current && pointers.current.size === 1) {
-      setOffset({
+      const nextOffset = {
         x: panRef.current.startX + (e.clientX - panRef.current.x),
         y: panRef.current.startY + (e.clientY - panRef.current.y)
-      });
+      };
+      applyTransform(transformRef.current.zoom, nextOffset);
+      scheduleViewportCull();
     }
   }
 
@@ -402,26 +454,36 @@ function App() {
     if (pointers.current.size === 0) {
       panRef.current = null;
       pinchRef.current = null;
+      const current = transformRef.current;
+      setZoom(current.zoom);
+      setOffset(current.offset);
+      scheduleViewportCull();
     }
   }
 
-  // Tối ưu hóa file gốc và nén preview WebP siêu nhẹ (< 200KB)
+  // Tạo các tier riêng: original giữ nguyên, canvas ~1000px, thumb ~240px.
   async function createUpload(rawFile) {
     const file = await optimizeUploadFile(rawFile);
     const id = crypto.randomUUID();
     const meta = await readImageMetadata(file);
-    const { blob: previewBlob, width: pw, height: ph } = await createWebpPreview(file);
+    const { thumb, canvas } = await createImageTiers(file);
+    const canvasBlob = canvas?.blob || null;
+    const thumbBlob = thumb?.blob || null;
+    const uploadName = (blob, fallback) => {
+      if (!blob) return fallback;
+      const ext = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'bin';
+      return `${fallback}.${ext}`;
+    };
 
     const formData = new FormData();
     formData.append('file', file);
-    if (previewBlob) {
-      formData.append('preview', previewBlob, 'preview.webp');
-    }
+    if (thumbBlob) formData.append('thumb', thumbBlob, uploadName(thumbBlob, 'thumb'));
+    if (canvasBlob) formData.append('canvas', canvasBlob, uploadName(canvasBlob, 'canvas'));
     formData.append('id', id);
     formData.append('caption', file.name.replace(/\.[^/.]+$/, ''));
     formData.append('capturedAt', meta.capturedAt);
-    formData.append('width', String(pw || meta.width));
-    formData.append('height', String(ph || meta.height));
+    formData.append('width', String(meta.width));
+    formData.append('height', String(meta.height));
     formData.append('sizeBytes', String(file.size));
     formData.append('mimeType', file.type || 'image/jpeg');
 
@@ -436,11 +498,15 @@ function App() {
       throw new Error(errData.error || 'Lỗi server (' + res.status + ')');
     }
 
-    const previewUrl = previewBlob ? URL.createObjectURL(previewBlob) : URL.createObjectURL(file);
+    const canvasUrl = canvasBlob ? URL.createObjectURL(canvasBlob) : URL.createObjectURL(file);
+    const thumbUrl = thumbBlob ? URL.createObjectURL(thumbBlob) : canvasUrl;
+    const originalUrl = URL.createObjectURL(file);
     return {
       id,
-      src: previewUrl,
-      ratio: (pw && ph ? pw / ph : meta.ratio) || 1,
+      src: canvasUrl,
+      thumbSrc: thumbUrl,
+      originalSrc: originalUrl,
+      ratio: meta.ratio || 1,
       date: (meta.capturedAt || new Date().toISOString()).slice(0, 10),
       tag: 'upload',
       caption: file.name.replace(/\.[^/.]+$/, '')
@@ -611,17 +677,18 @@ function App() {
     <main className="app">
       <header>
         <div className="count">{visible.length} memories</div>
-        <div className="header-actions">
-          <button
-            className="icon-button"
-            onClick={() => fitLayout()}
-            aria-label="Fit canvas"
-            title="Fit canvas"
-          >
-            <Icon name="fit" />
-          </button>
-        </div>
       </header>
+
+      <div className="canvas-controls">
+        <button
+          className="icon-button"
+          onClick={() => fitLayout()}
+          aria-label="Fit canvas"
+          title="Fit canvas"
+        >
+          <Icon name="fit" />
+        </button>
+      </div>
 
       <div className="actions">
         <button
@@ -732,6 +799,7 @@ function App() {
       </section>
 
       <section
+        ref={viewportRef}
         className="viewport"
         onWheel={onWheel}
         onPointerDown={onPointerDown}
@@ -740,12 +808,14 @@ function App() {
         onPointerCancel={onPointerUp}
       >
         <div
+          ref={worldRef}
           className="world"
-          style={{ transform: `translate3d(${offset.x}px,${offset.y}px,0) scale(${zoom})` }}
+          style={{ transform: `translate3d(${transformRef.current.offset.x}px,${transformRef.current.offset.y}px,0) scale(${transformRef.current.zoom})` }}
         >
           {visible.map((p, i) => {
             const pos = layout.items[i];
             if (!pos) return null;
+            if (culledIds && !culledIds.has(p.id)) return null;
             return (
               <article
                 key={p.id}
@@ -760,12 +830,17 @@ function App() {
                 }}
               >
                 <img
-                  src={p.src}
+                  src={p.thumbSrc || p.src}
+                  data-canvas-src={p.src || ''}
                   loading="lazy"
                   decoding="async"
                   draggable="false"
                   alt={p.caption || 'memory'}
                   onLoad={(e) => {
+                    const canvasSrc = e.currentTarget.dataset.canvasSrc;
+                    if (canvasSrc && e.currentTarget.src !== new URL(canvasSrc, window.location.href).href) {
+                      e.currentTarget.src = canvasSrc;
+                    }
                     const r = e.currentTarget.naturalWidth / e.currentTarget.naturalHeight;
                     if (Number.isFinite(r) && Math.abs((p.ratio || 1) - r) > 0.01) {
                       setPhotos((xs) => xs.map((x) => (x.id === p.id ? { ...x, ratio: r } : x)));
@@ -785,6 +860,20 @@ function App() {
           onClick={() => {
             setSelected(null);
             setEditing(false);
+          }}
+          onTouchStart={(e) => {
+            const touch = e.touches[0];
+            lightboxTouchRef.current = { x: touch.clientX, y: touch.clientY };
+          }}
+          onTouchEnd={(e) => {
+            const start = lightboxTouchRef.current;
+            if (!start) return;
+            const touch = e.changedTouches[0];
+            const dx = touch.clientX - start.x;
+            const dy = touch.clientY - start.y;
+            lightboxTouchRef.current = null;
+            if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
+            navigateLightbox(dx < 0 ? 1 : -1);
           }}
         >
           <div className="lightbox-nav" onClick={(e) => e.stopPropagation()}>
@@ -807,7 +896,7 @@ function App() {
           </div>
 
           <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
-            <img src={selected.src} alt={selected.caption} />
+            <img src={selected.originalSrc || selected.src} alt={selected.caption} />
           </div>
 
           <div className="lightbox-info" onClick={(e) => e.stopPropagation()}>

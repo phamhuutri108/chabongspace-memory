@@ -1,0 +1,64 @@
+# CHÀ BÔNG MEMORY — Upgrade Plan
+
+## Strategy
+Nâng cấp theo từng checkpoint, không rewrite toàn bộ app cùng lúc.
+
+1. Performance baseline
+2. Renderer isolation
+3. Viewport culling
+4. Image tiers / decode optimization
+5. IndexedDB + optimistic UI
+6. Upload queue + direct R2
+7. Pagination + prefetch
+8. Offline support
+9. iOS native wrapper + AVFoundation camera
+10. Security / migration / final benchmark
+
+## Phase 1 — Performance baseline
+**Status: 🟨 Instrumentation + build baseline complete; real-device FPS benchmark pending**
+
+Measure on 50 / 250 / 500 / 1000 photos: initial render, collage layout time, pan responsiveness, zoom/pinch responsiveness, mounted photo nodes, image decode/network load, memory usage.
+See `docs/performance-baseline.md`.
+
+## Phase 2 — Renderer isolation
+**Status: 🟩 Implemented**
+Pan/zoom updates the compositor directly; React state is not updated for every pointer movement. Implemented `transformRef`, direct `translate3d(...) scale(...)`, and RAF-coalesced viewport recalculation.
+
+## Phase 3 — Viewport culling
+**Status: 🟩 Implemented**
+Only photos intersecting the viewport plus a prefetch margin are mounted. Implemented viewport bounds calculation, 700px world-space prefetch margin, `culledIds`, RAF-coalesced culling, and lazy/async image decoding.
+
+Additional performance fix: removed the old O(n²) multi-pass `pushApart()` collision loop from collage generation. The row layout already guarantees row separation.
+
+## Phase 4 — Image tiers / decode optimization
+**Status: 🟩 Implemented**
+Target: `thumb` ~160–240px, `canvas` ~600–1000px, `original` in native source format. Canvas should never depend on original resolution. Do not force WebP when it is larger than the source.
+
+Implemented: upload now keeps the original file untouched, generates separate `thumb` (240px) and `canvas` (1000px) tiers, chooses the smaller WebP/JPEG encoder result, and falls back to the source when an encoded tier would be larger. D1 now stores `thumb_key` and `canvas_key`; legacy `preview_key` remains readable. The collage loads thumb first and promotes to canvas, while lightbox uses original.
+
+## Phase 5 — Local-first
+**Status: ⬜**
+Add IndexedDB for photos, image blobs, upload queue, and sync state. Flow: capture/select → local processing → IndexedDB → UI immediately → upload queue.
+
+## Phase 6 — Upload architecture
+**Status: ⬜**
+Replace browser → Worker → R2 media proxying with browser → Worker auth/signing → presigned R2 PUT. Then R2 upload → D1 metadata commit. Add retry and interrupted-upload recovery.
+
+## Phase 7 — API / prefetch
+**Status: ⬜**
+Cursor pagination, incremental metadata loading, nearby canvas prefetch, and lightbox previous/current/next preloading.
+
+## Phase 8 — Offline
+**Status: ⬜**
+Local gallery offline, queued uploads offline, sync on reconnect, optional Service Worker after IndexedDB is stable.
+
+## Phase 9 — Native iOS camera
+**Status: ⬜**
+Target: iOS Native Wrapper → AVFoundation → Native Camera → JS/WKWebView Bridge → Web UI. Technology: Swift, WKWebView, AVFoundation, AVCaptureSession, AVCapturePhotoOutput. Browser/PWA keeps `getUserMedia()` as fallback.
+
+## Phase 10 — Production hardening
+**Status: ⬜**
+Remove hardcoded production password fallback, review CORS/session handling, secure R2 writes, preserve legacy photo compatibility, migrate old preview assets gradually, final benchmark on 500 / 1000 / 2000 photos.
+
+## Checkpoint rule
+After every phase: 1) build, 2) test, 3) benchmark, 4) inspect diff, 5) commit checkpoint, 6) only then continue. If performance or stability gets worse, rollback the current phase before adding another layer.
