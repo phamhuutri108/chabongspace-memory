@@ -53,8 +53,8 @@ The photo API now uses stable cursor pagination with a `(captured_at/created_at,
 The gallery caches server photo metadata in IndexedDB and falls back to the cached gallery when the API is unavailable. The existing local-first upload queue now explicitly pauses while offline and resumes on reconnect. A Service Worker uses a cache-first strategy for `/media/` responses so previously viewed thumbnails/canvas/original assets can remain available offline. The UI exposes the current online/offline state while preserving optimistic local uploads.
 
 ## Phase 9 — Native iOS camera
-**Status: ⬜**
-Target: iOS Native Wrapper → AVFoundation → Native Camera → JS/WKWebView Bridge → Web UI. Technology: Swift, WKWebView, AVFoundation, AVCaptureSession, AVCapturePhotoOutput. Browser/PWA keeps `getUserMedia()` as fallback.
+**Status: 🟩 Implemented**
+Added `ios/ChabongMemory.xcodeproj`: a small Swift/UIKit wrapper that loads `https://memory.chabongspace.com` in `WKWebView`, exposes a `chabongCamera` message handler, and presents an `AVCaptureSession` + `AVCapturePhotoOutput` native camera. Captured JPEG data is returned to the web UI through a `chabong-native-photo` DOM event, then enters the same IndexedDB/local-first upload queue as normal web uploads. The browser/PWA path keeps `getUserMedia()` as the fallback. Open `ios/ChabongMemory.xcodeproj` in Xcode, select a signing team, and run on an iPhone; camera permission is declared in `Info.plist`.
 
 ## Phase 10 — Production hardening
 **Status: ⬜**

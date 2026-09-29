@@ -853,6 +853,10 @@ function App() {
   }
 
   async function startCamera() {
+    if (window.webkit?.messageHandlers?.chabongCamera) {
+      window.webkit.messageHandlers.chabongCamera.postMessage({ action: 'capture' });
+      return;
+    }
     try {
       const s = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -909,6 +913,25 @@ function App() {
       0.82
     );
   }
+
+  useEffect(() => {
+    const onNativePhoto = async (event) => {
+      const { dataUrl, filename } = event.detail || {};
+      if (!dataUrl) return;
+      try {
+        setBusy(true);
+        const response = await fetch(dataUrl);
+        const blob = await response.blob();
+        await queueUpload(new File([blob], filename || `memory-${Date.now()}.jpg`, { type: blob.type || 'image/jpeg' }));
+      } catch (error) {
+        alert('Không thể lưu ảnh từ camera: ' + (error.message || 'Lỗi không xác định'));
+      } finally {
+        setBusy(false);
+      }
+    };
+    window.addEventListener('chabong-native-photo', onNativePhoto);
+    return () => window.removeEventListener('chabong-native-photo', onNativePhoto);
+  }, []);
 
   // Lightbox Actions
   function navigateLightbox(dir) {
