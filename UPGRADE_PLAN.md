@@ -41,8 +41,8 @@ Implemented: upload now keeps the original file untouched, generates separate `t
 Added an IndexedDB layer for local photo records and upload jobs. File/camera uploads are processed locally first, written to IndexedDB, rendered immediately with `pending` sync state, then uploaded asynchronously. Failed jobs remain queued and retry after 5 seconds or when the browser comes back online; successful jobs reconcile to server R2 URLs. Local pending/uploading records are restored on reload.
 
 ## Phase 6 — Upload architecture
-**Status: ⬜**
-Replace browser → Worker → R2 media proxying with browser → Worker auth/signing → presigned R2 PUT. Then R2 upload → D1 metadata commit. Add retry and interrupted-upload recovery.
+**Status: 🟨 Implemented; production R2 S3 credentials still required**
+Browser upload jobs now request a signed upload plan from the Worker, PUT original/thumb/canvas directly to R2, then commit metadata to D1. The upload plan is HMAC-bound to the session secret and expires after 1 hour, so retries can safely reuse the same deterministic object keys. The existing `/api/upload` Worker proxy remains as a temporary fallback while `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are not configured. R2 bucket CORS is configured for `memory.chabongspace.com`, local development, and Quick Tunnel testing via `r2-cors.json`.
 
 ## Phase 7 — API / prefetch
 **Status: ⬜**

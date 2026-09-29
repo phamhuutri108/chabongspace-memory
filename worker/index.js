@@ -95,6 +95,80 @@ async function verifyToken(secret, token) {
   return token === expected;
 }
 
+function base64UrlEncode(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => (binary += String.fromCharCode(byte)));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized + "=".repeat((4 - (normalized.length % 4)) % 4));
+  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+}
+
+async function signUploadPlan(secret, payload) {
+  const encoded = base64UrlEncode(JSON.stringify(payload));
+  const key = await getHmacKey(secret);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
+  const hex = Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return encoded + "." + hex;
+}
+
+async function verifyUploadPlan(secret, token) {
+  if (!token || typeof token !== "string") return null;
+  const [encoded, signature] = token.split(".");
+  if (!encoded || !signature) return null;
+  const key = await getHmacKey(secret);
+  const expected = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
+  const expectedHex = Array.from(new Uint8Array(expected))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  if (signature !== expectedHex) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(encoded));
+    if (!payload.exp || Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function uploadKeys(id, now) {
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const prefix = "photos/" + year + "/" + month + "/" + id;
+  return {
+    prefix,
+    key: prefix + "/original",
+    thumbKey: prefix + "/thumb",
+    canvasKey: prefix + "/canvas"
+  };
+}
+
+async function getPresignedPutUrl(env, key, contentType) {
+  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) return null;
+  const accountId = env.R2_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
+  const bucket = env.R2_BUCKET_NAME || "chabongspace-memory-media";
+  if (!accountId) throw new Error("R2_ACCOUNT_ID is not configured");
+  const client = new AwsClient({
+    service: "s3",
+    region: "auto",
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY
+  });
+  const url = new URL("https://" + accountId + ".r2.cloudflarestorage.com/" + bucket + "/" + key);
+  url.searchParams.set("X-Amz-Expires", "3600");
+  const signed = await client.sign(
+    new Request(url, { method: "PUT", headers: { "Content-Type": contentType } }),
+    { aws: { signQuery: true } }
+  );
+  return signed.url.toString();
+}
+
 function parseCookie(request, name) {
   const cookie = request.headers.get("cookie") || "";
   const match = cookie.match(new RegExp(`(^|;\\s*)${name}=([^;]*)`));
@@ -272,7 +346,77 @@ export default {
         return json({ photos: results, nextCursor }, { headers: cors });
       }
 
-      // 6. Direct Upload via R2 binding (Fast, No S3 token required!)
+      // 6. Direct R2 upload planning: Worker signs, browser uploads to R2.
+      if (url.pathname === "/api/upload/presign" && request.method === "POST") {
+        if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
+          return json({ error: "Direct R2 upload is not configured" }, { status: 503, headers: cors });
+        }
+        const body = await request.json().catch(() => ({}));
+        const id = String(body.id || "");
+        if (!/^[0-9a-f-]{20,64}$/i.test(id)) {
+          return json({ error: "A valid upload id is required" }, { status: 400, headers: cors });
+        }
+        const keys = uploadKeys(id, new Date());
+        const contentTypes = {
+          original: body.mimeType || "application/octet-stream",
+          thumb: body.thumbMimeType || "image/webp",
+          canvas: body.canvasMimeType || "image/webp"
+        };
+        const [originalUrl, thumbUrl, canvasUrl] = await Promise.all([
+          getPresignedPutUrl(env, keys.key, contentTypes.original),
+          body.hasThumb === false ? null : getPresignedPutUrl(env, keys.thumbKey, contentTypes.thumb),
+          body.hasCanvas === false ? null : getPresignedPutUrl(env, keys.canvasKey, contentTypes.canvas)
+        ]);
+        const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
+        const planToken = await signUploadPlan(secret, {
+          id,
+          exp: Date.now() + 60 * 60 * 1000,
+          keys,
+          contentTypes
+        });
+        return json({ ok: true, id, planToken, uploads: {
+          original: { key: keys.key, url: originalUrl, contentType: contentTypes.original },
+          thumb: thumbUrl ? { key: keys.thumbKey, url: thumbUrl, contentType: contentTypes.thumb } : null,
+          canvas: canvasUrl ? { key: keys.canvasKey, url: canvasUrl, contentType: contentTypes.canvas } : null
+        } }, { headers: cors });
+      }
+
+      // Commit D1 metadata only after direct R2 uploads are complete.
+      if (url.pathname === "/api/upload/commit" && request.method === "POST") {
+        const body = await request.json().catch(() => ({}));
+        const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
+        const plan = await verifyUploadPlan(secret, body.planToken);
+        if (!plan) return json({ error: "Upload plan is invalid or expired" }, { status: 401, headers: cors });
+        if (!env.MEDIA || !env.DB) return json({ error: "Storage or database is not configured" }, { status: 500, headers: cors });
+        const keys = plan.keys || {};
+        if (!keys.key || !String(keys.key).startsWith("photos/") || String(keys.key).split("/").slice(-2)[0] !== plan.id) {
+          return json({ error: "Invalid upload keys" }, { status: 400, headers: cors });
+        }
+        const original = await env.MEDIA.head(keys.key);
+        if (!original) return json({ error: "Original upload is missing" }, { status: 400, headers: cors });
+        const thumb = keys.thumbKey ? await env.MEDIA.head(keys.thumbKey) : null;
+        const canvas = keys.canvasKey ? await env.MEDIA.head(keys.canvasKey) : null;
+        const now = new Date();
+        const capturedAt = body.capturedAt || now.toISOString();
+        const caption = body.caption || "";
+        const tags = body.tags || "";
+        const width = Number(body.width) || null;
+        const height = Number(body.height) || null;
+        const mimeType = plan.contentTypes?.original || original.httpMetadata?.contentType || "application/octet-stream";
+        const commitSql = [
+          "INSERT INTO photos (id, r2_key, preview_key, thumb_key, canvas_key, created_at, captured_at, caption, tags, width, height, size_bytes, mime_type, status)",
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \"ready\")",
+          "ON CONFLICT(id) DO UPDATE SET r2_key = excluded.r2_key, preview_key = COALESCE(excluded.canvas_key, excluded.preview_key), thumb_key = excluded.thumb_key, canvas_key = excluded.canvas_key, status = \"ready\", width = COALESCE(excluded.width, photos.width), height = COALESCE(excluded.height, photos.height), caption = COALESCE(excluded.caption, photos.caption), tags = COALESCE(excluded.tags, photos.tags)"
+        ].join(" ");
+        await env.DB.prepare(commitSql).bind(
+          plan.id, keys.key, canvas ? keys.canvasKey : null, thumb ? keys.thumbKey : null,
+          canvas ? keys.canvasKey : null, now.toISOString(), capturedAt, caption || null,
+          tags || null, width, height, original.size || null, mimeType
+        ).run();
+        return json({ ok: true, id: plan.id, key: keys.key, thumbKey: thumb ? keys.thumbKey : null, canvasKey: canvas ? keys.canvasKey : null, capturedAt, width, height }, { headers: cors });
+      }
+
+      // 7. Legacy Worker-proxied upload kept as a migration fallback.
       if (url.pathname === "/api/upload" && request.method === "POST") {
         if (!env.MEDIA) {
           return json({ error: "Cloudflare R2 MEDIA binding not found" }, { status: 500, headers: cors });

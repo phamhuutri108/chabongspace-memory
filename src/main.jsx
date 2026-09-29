@@ -553,6 +553,65 @@ function App() {
   }
 
   async function sendUploadJob(job) {
+    const directPayload = {
+      id: job.id,
+      mimeType: job.mimeType || job.fileBlob.type || "application/octet-stream",
+      thumbMimeType: job.thumbBlob?.type || "image/webp",
+      canvasMimeType: job.canvasBlob?.type || "image/webp",
+      hasThumb: Boolean(job.thumbBlob),
+      hasCanvas: Boolean(job.canvasBlob)
+    };
+    const presign = await fetch(API + "/upload/presign", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(directPayload)
+    });
+
+    if (presign.ok) {
+      const plan = await presign.json();
+      const putObject = async (upload, blob) => {
+        if (!upload || !blob) return;
+        const response = await fetch(upload.url, {
+          method: "PUT",
+          headers: { "Content-Type": upload.contentType },
+          body: blob
+        });
+        if (!response.ok) throw new Error("R2 upload failed (" + response.status + ")");
+      };
+
+      await Promise.all([
+        putObject(plan.uploads.original, job.fileBlob),
+        putObject(plan.uploads.thumb, job.thumbBlob),
+        putObject(plan.uploads.canvas, job.canvasBlob)
+      ]);
+
+      const commit = await fetch(API + "/upload/commit", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          planToken: plan.planToken,
+          capturedAt: job.capturedAt,
+          caption: job.caption || "",
+          tags: job.tags || "",
+          width: job.width || null,
+          height: job.height || null
+        })
+      });
+      if (!commit.ok) {
+        const errorData = await commit.json().catch(() => ({}));
+        throw new Error(errorData.error || "Lỗi commit metadata (" + commit.status + ")");
+      }
+      return commit.json();
+    }
+
+    if (presign.status !== 503) {
+      const errorData = await presign.json().catch(() => ({}));
+      throw new Error(errorData.error || "Lỗi chuẩn bị upload (" + presign.status + ")");
+    }
+
+    // Migration fallback until R2 S3 credentials + CORS are configured.
     const uploadName = (blob, fallback) => {
       if (!blob) return fallback;
       const ext = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'bin';

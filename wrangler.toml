@@ -3,6 +3,10 @@ main = "worker/index.js"
 compatibility_date = "2026-09-25"
 account_id = "728f48cca2b820be7015a84a32b4f809"
 
+[vars]
+R2_ACCOUNT_ID = "728f48cca2b820be7015a84a32b4f809"
+R2_BUCKET_NAME = "chabongspace-memory-media"
+
 [assets]
 directory = "./dist"
 binding = "ASSETS"
