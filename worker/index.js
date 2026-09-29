@@ -293,13 +293,30 @@ export default {
         const from = (url.searchParams.get("from") || "").trim();
         const to = (url.searchParams.get("to") || "").trim();
         const cursor = (url.searchParams.get("cursor") || "").trim();
+        let cursorValue = null;
+        let cursorId = null;
+        if (cursor) {
+          try {
+            const parsed = JSON.parse(atob(cursor.replace(/-/g, "+").replace(/_/g, "/")));
+            cursorValue = String(parsed.value || "");
+            cursorId = String(parsed.id || "");
+          } catch {
+            // Backward-compatible cursor: treat it as the previous timestamp only.
+            cursorValue = cursor;
+          }
+        }
 
         const conditions = ["status = 'ready'"];
         const params = [];
 
-        if (cursor) {
-          conditions.push("COALESCE(captured_at, created_at) < ?");
-          params.push(cursor);
+        if (cursorValue) {
+          if (cursorId) {
+            conditions.push("(COALESCE(captured_at, created_at) < ? OR (COALESCE(captured_at, created_at) = ? AND id < ?))");
+            params.push(cursorValue, cursorValue, cursorId);
+          } else {
+            conditions.push("COALESCE(captured_at, created_at) < ?");
+            params.push(cursorValue);
+          }
         }
 
         if (q) {
@@ -331,17 +348,20 @@ export default {
                  size_bytes, mime_type, status
           FROM photos
           WHERE ${conditions.join(" AND ")}
-          ORDER BY COALESCE(captured_at, created_at) DESC
+          ORDER BY COALESCE(captured_at, created_at) DESC, id DESC
           LIMIT ?
         `;
         params.push(limit);
 
         const rows = await env.DB.prepare(sql).bind(...params).all();
         const results = rows.results || [];
-        const nextCursor =
-          results.length === limit
-            ? results[results.length - 1].captured_at || results[results.length - 1].created_at
-            : null;
+        const last = results[results.length - 1];
+        const nextCursor = results.length === limit && last
+          ? btoa(JSON.stringify({
+              value: last.captured_at || last.created_at,
+              id: last.id
+            }))
+          : null;
 
         return json({ photos: results, nextCursor }, { headers: cors });
       }

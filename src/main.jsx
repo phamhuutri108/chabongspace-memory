@@ -170,6 +170,8 @@ function App() {
   const [zoom, setZoom] = useState(0.2);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [culledIds, setCulledIds] = useState(null);
+  const [hasMorePhotos, setHasMorePhotos] = useState(false);
+  const [loadingMorePhotos, setLoadingMorePhotos] = useState(false);
 
   const fileRef = useRef(),
     videoRef = useRef(),
@@ -177,7 +179,11 @@ function App() {
     viewportRef = useRef(null),
     worldRef = useRef(null),
     transformRef = useRef({ zoom: 0.2, offset: { x: 0, y: 0 } }),
-    cullFrameRef = useRef(null);
+    cullFrameRef = useRef(null),
+    paginationCursorRef = useRef(null),
+    paginationRequestRef = useRef(0),
+    paginationLoadingRef = useRef(false),
+    preloadedUrlsRef = useRef(new Set());
   const pointers = useRef(new Map()),
     panRef = useRef(null),
     pinchRef = useRef(null),
@@ -229,48 +235,76 @@ function App() {
     } catch {}
   }
 
-  // Fetch photos from D1 database
-  const loadPhotos = () => {
+  const serverRowToPhoto = (p) => ({
+    ...p,
+    src: (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
+    thumbSrc: p.thumb_key ? '/media/' + p.thumb_key : (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
+    originalSrc: p.r2_key ? '/media/' + p.r2_key : null,
+    date: (p.captured_at || p.created_at || '').slice(0, 10),
+    tag: p.tags || '',
+    caption: p.caption || '',
+    ratio: p.width && p.height ? p.width / p.height : 1,
+    syncState: 'ready'
+  });
+
+  const loadPhotos = async ({ reset = true } = {}) => {
     if (!authed) return;
-    const params = new URLSearchParams();
-    params.set('limit', '250');
-    if (query) params.set('q', query);
-    if (activeFilter) params.set('tag', activeFilter);
-    if (dateFrom) params.set('from', dateFrom);
-    if (dateTo) params.set('to', dateTo);
+    if (!reset && (paginationLoadingRef.current || !paginationCursorRef.current || !hasMorePhotos)) return;
+    const requestId = ++paginationRequestRef.current;
+    paginationLoadingRef.current = true;
+    if (!reset) setLoadingMorePhotos(true);
+    try {
+      const params = new URLSearchParams();
+      params.set('limit', '100');
+      if (!reset && paginationCursorRef.current) params.set('cursor', paginationCursorRef.current);
+      if (query) params.set('q', query);
+      if (activeFilter) params.set('tag', activeFilter);
+      if (dateFrom) params.set('from', dateFrom);
+      if (dateTo) params.set('to', dateTo);
 
-    fetch(API + '/photos?' + params.toString(), { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : { photos: [] }))
-      .then((res) => {
-        const rows = res.photos || (Array.isArray(res) ? res : []);
-        if (rows.length) {
-          const serverPhotos = rows.map((p) => ({
-              ...p,
-              src: (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
-              thumbSrc: p.thumb_key ? '/media/' + p.thumb_key : (p.canvas_key || p.preview_key) ? '/media/' + (p.canvas_key || p.preview_key) : null,
-              originalSrc: p.r2_key ? '/media/' + p.r2_key : null,
-              date: (p.captured_at || p.created_at || '').slice(0, 10),
-              tag: p.tags || '',
-              caption: p.caption || '',
-              ratio: p.width && p.height ? p.width / p.height : 1,
-              syncState: 'ready'
-            }));
-          getLocalPhotos()
-            .then((records) => {
-              const pending = records
-                .filter((record) => record.state === 'pending' || record.state === 'uploading')
-                .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-                .map(localRecordToPhoto);
-              setPhotos([...pending, ...serverPhotos.filter((p) => !pending.some((x) => x.id === p.id))]);
-            })
-            .catch(() => setPhotos(serverPhotos));
-        } else {
-          hydrateLocalPhotos();
-        }
-      })
-      .catch(() => {});
+      const response = await fetch(API + '/photos?' + params.toString(), { credentials: 'include' });
+      const res = response.ok ? await response.json() : { photos: [], nextCursor: null };
+      if (requestId !== paginationRequestRef.current) return;
+      const rows = res.photos || (Array.isArray(res) ? res : []);
+      const serverPhotos = rows.map(serverRowToPhoto);
+      paginationCursorRef.current = res.nextCursor || null;
+      setHasMorePhotos(Boolean(res.nextCursor));
 
-    // Fetch dynamic tags list
+      if (reset) {
+        getLocalPhotos()
+          .then((records) => {
+            const pending = records
+              .filter((record) => record.state === 'pending' || record.state === 'uploading')
+              .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+              .map(localRecordToPhoto);
+            setPhotos([...pending, ...serverPhotos.filter((p) => !pending.some((x) => x.id === p.id))]);
+          })
+          .catch(() => setPhotos(serverPhotos));
+        if (!rows.length) hydrateLocalPhotos();
+      } else if (serverPhotos.length) {
+        setPhotos((current) => {
+          const existing = new Set(current.map((p) => p.id));
+          return [...current, ...serverPhotos.filter((p) => !existing.has(p.id))];
+        });
+      }
+    } catch {}
+    finally {
+      if (requestId === paginationRequestRef.current) {
+        paginationLoadingRef.current = false;
+        setLoadingMorePhotos(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    paginationCursorRef.current = null;
+    setHasMorePhotos(false);
+    loadPhotos({ reset: true });
+    if (authed) hydrateLocalPhotos();
+  }, [authed, query, activeFilter, dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (!authed) return;
     fetch(API + '/tags', { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : []))
       .then((tags) => {
@@ -280,12 +314,7 @@ function App() {
         }
       })
       .catch(() => {});
-  };
-
-  useEffect(() => {
-    loadPhotos();
-    if (authed) hydrateLocalPhotos();
-  }, [authed, query, activeFilter, dateFrom, dateTo]);
+  }, [authed]);
 
   // Client-side filtering fallback for demo mode
   const visible = useMemo(() => {
@@ -302,6 +331,33 @@ function App() {
       return titleMatch && filterMatch;
     });
   }, [photos, query, activeFilter, dateFrom, dateTo]);
+
+  // Prefetch nearby canvas tiers so the collage stays sharp while panning.
+  useEffect(() => {
+    if (!visible.length) return;
+    const mounted = new Set(culledIds || visible.slice(0, 10).map((p) => p.id));
+    const candidates = [];
+    visible.forEach((photo, index) => {
+      if (!mounted.has(photo.id)) return;
+      candidates.push(...visible.slice(Math.max(0, index - 2), index + 5));
+    });
+    candidates.slice(0, 18).forEach((photo) => {
+      const url = photo.src;
+      if (!url || preloadedUrlsRef.current.has(url)) return;
+      preloadedUrlsRef.current.add(url);
+      const image = new Image();
+      image.decoding = 'async';
+      image.src = url;
+    });
+  }, [visible, culledIds]);
+
+  // The canvas is panned rather than natively scrolled, so load another page
+  // when the current viewport reaches the end of the loaded result set.
+  useEffect(() => {
+    if (!hasMorePhotos || !culledIds?.size || paginationLoadingRef.current) return;
+    const tailIds = new Set(visible.slice(-24).map((p) => p.id));
+    if ([...culledIds].some((id) => tailIds.has(id))) loadPhotos({ reset: false });
+  }, [culledIds, visible, hasMorePhotos]);
 
   const layout = useMemo(() => buildCollage(visible), [visible]);
 
@@ -787,6 +843,22 @@ function App() {
     setSelected(visible[nextIndex]);
     setEditing(false);
   }
+
+  // Preload the previous/current/next original images while the lightbox is open.
+  useEffect(() => {
+    if (!selected || !visible.length) return;
+    const index = visible.findIndex((p) => p.id === selected.id);
+    if (index < 0) return;
+    [-1, 0, 1].forEach((delta) => {
+      const photo = visible[(index + delta + visible.length) % visible.length];
+      const url = photo?.originalSrc || photo?.src;
+      if (!url || preloadedUrlsRef.current.has(url)) return;
+      preloadedUrlsRef.current.add(url);
+      const image = new Image();
+      image.decoding = 'async';
+      image.src = url;
+    });
+  }, [selected, visible]);
 
   async function handleDeletePhoto(id) {
     if (!window.confirm('Bạn có chắc chắn muốn xóa kỷ niệm này?')) return;

@@ -41,12 +41,12 @@ Implemented: upload now keeps the original file untouched, generates separate `t
 Added an IndexedDB layer for local photo records and upload jobs. File/camera uploads are processed locally first, written to IndexedDB, rendered immediately with `pending` sync state, then uploaded asynchronously. Failed jobs remain queued and retry after 5 seconds or when the browser comes back online; successful jobs reconcile to server R2 URLs. Local pending/uploading records are restored on reload.
 
 ## Phase 6 — Upload architecture
-**Status: 🟨 Implemented; production R2 S3 credentials still required**
+**Status: 🟩 Implemented**
 Browser upload jobs now request a signed upload plan from the Worker, PUT original/thumb/canvas directly to R2, then commit metadata to D1. The upload plan is HMAC-bound to the session secret and expires after 1 hour, so retries can safely reuse the same deterministic object keys. The existing `/api/upload` Worker proxy remains as a temporary fallback while `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are not configured. R2 bucket CORS is configured for `memory.chabongspace.com`, local development, and Quick Tunnel testing via `r2-cors.json`.
 
 ## Phase 7 — API / prefetch
-**Status: ⬜**
-Cursor pagination, incremental metadata loading, nearby canvas prefetch, and lightbox previous/current/next preloading.
+**Status: 🟩 Implemented**
+The photo API now uses stable cursor pagination with a `(captured_at/created_at, id)` tie-breaker. The gallery loads 100 records initially and appends the next page when the viewport reaches the loaded tail. Nearby canvas tiers are prefetched around mounted photos, and the lightbox preloads previous/current/next originals. Existing filters are preserved across pages.
 
 ## Phase 8 — Offline
 **Status: ⬜**
