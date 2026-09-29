@@ -27,6 +27,10 @@ These numbers measure build output, not browser runtime performance.
 | 1000 | pending | pending | pending | pending | pending |
 | 2000 | pending | pending | pending | pending | pending |
 
+## Phase 10 synthetic benchmark
+
+Run `npm run benchmark` to reproduce a Node-only benchmark of the current collage layout and viewport-culling algorithms. This uses synthetic metadata and no real photos, network, or browser rendering. The command reports CPU milliseconds and the number of records mounted by the culling calculation for 500 / 1000 / 2000 photos. These values are useful for regression detection, not as a substitute for Safari FPS or memory profiling.
+
 ## What changed in Phase 1–3
 
 ### 1. Removed O(n²) collage collision pass

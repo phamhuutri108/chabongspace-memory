@@ -10,18 +10,22 @@ const json = (data, init = {}) =>
   });
 
 const corsHeaders = {
-  "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
   "access-control-allow-headers": "content-type,authorization",
   "access-control-allow-credentials": "true"
 };
 
 function getCors(request, extra = {}) {
-  const origin = request.headers.get("origin") || "*";
+  const origin = request.headers.get("origin") || "";
+  const allowedOrigins = new Set([
+    "https://memory.chabongspace.com",
+    "http://localhost:5173",
+    "http://localhost:8787"
+  ]);
+  const headers = { ...corsHeaders, ...extra };
+  if (allowedOrigins.has(origin)) headers["access-control-allow-origin"] = origin;
   return {
-    ...corsHeaders,
-    "access-control-allow-origin": origin,
-    ...extra
+    ...headers
   };
 }
 
@@ -89,10 +93,18 @@ async function verifyToken(secret, token) {
   const [timestampStr] = parts;
   const ts = Number(timestampStr);
   if (!ts || isNaN(ts)) return false;
-  // 30 days max age
-  if (Date.now() - ts > 30 * 24 * 60 * 60 * 1000) return false;
-  const expected = await signToken(secret, ts);
-  return token === expected;
+  const age = Date.now() - ts;
+  if (age < 0 || age > 30 * 24 * 60 * 60 * 1000) return false;
+  const signature = parts[1];
+  if (!/^[0-9a-f]{64}$/i.test(signature)) return false;
+  const key = await getHmacKey(secret);
+  const valid = await crypto.subtle.verify(
+    "HMAC",
+    key,
+    Uint8Array.from(signature.match(/.{2}/g), (hex) => parseInt(hex, 16)),
+    new TextEncoder().encode(String(ts))
+  );
+  return valid;
 }
 
 function base64UrlEncode(value) {
@@ -120,17 +132,22 @@ async function signUploadPlan(secret, payload) {
 
 async function verifyUploadPlan(secret, token) {
   if (!token || typeof token !== "string") return null;
-  const [encoded, signature] = token.split(".");
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  const [encoded, signature] = parts;
   if (!encoded || !signature) return null;
+  if (!/^[0-9a-f]{64}$/i.test(signature)) return null;
   const key = await getHmacKey(secret);
-  const expected = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
-  const expectedHex = Array.from(new Uint8Array(expected))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  if (signature !== expectedHex) return null;
+  const valid = await crypto.subtle.verify(
+    "HMAC",
+    key,
+    Uint8Array.from(signature.match(/.{2}/g), (hex) => parseInt(hex, 16)),
+    new TextEncoder().encode(encoded)
+  );
+  if (!valid) return null;
   try {
     const payload = JSON.parse(base64UrlDecode(encoded));
-    if (!payload.exp || Date.now() > payload.exp) return null;
+    if (!payload.exp || Date.now() > payload.exp || !payload.id || !payload.keys?.key) return null;
     return payload;
   } catch {
     return null;
@@ -176,7 +193,8 @@ function parseCookie(request, name) {
 }
 
 async function isAuthorized(request, env) {
-  const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
+  const secret = env.SESSION_SECRET;
+  if (!secret) return false;
   const authHeader = request.headers.get("authorization") || "";
   const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
   const cookie = parseCookie(request, "memory_session");
@@ -221,11 +239,13 @@ export default {
 
       // 3. Auth endpoints
       if (url.pathname === "/api/auth/verify" && request.method === "POST") {
+        if (!env.AUTH_PASSWORD || !env.SESSION_SECRET) {
+          return json({ error: "Authentication is not configured" }, { status: 503, headers: cors });
+        }
         const body = await request.json().catch(() => ({}));
-        const masterPassword = env.AUTH_PASSWORD || "04112003";
+        const masterPassword = env.AUTH_PASSWORD;
         if (body.password === masterPassword) {
-          const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
-          const token = await signToken(secret, Date.now());
+          const token = await signToken(env.SESSION_SECRET, Date.now());
           const cookieHeader = `memory_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}; Secure`;
           return json(
             { ok: true, token },
@@ -376,19 +396,28 @@ export default {
         if (!/^[0-9a-f-]{20,64}$/i.test(id)) {
           return json({ error: "A valid upload id is required" }, { status: 400, headers: cors });
         }
+        const mimeType = String(body.mimeType || "application/octet-stream").toLowerCase();
+        const allowedMimeTypes = new Set([
+          "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/avif"
+        ]);
+        if (!allowedMimeTypes.has(mimeType)) {
+          return json({ error: "Unsupported image MIME type" }, { status: 415, headers: cors });
+        }
         const keys = uploadKeys(id, new Date());
         const contentTypes = {
-          original: body.mimeType || "application/octet-stream",
+          original: mimeType,
           thumb: body.thumbMimeType || "image/webp",
           canvas: body.canvasMimeType || "image/webp"
         };
+        if (![contentTypes.thumb, contentTypes.canvas].every((type) => ["image/webp", "image/jpeg", "image/png"].includes(String(type).toLowerCase()))) {
+          return json({ error: "Unsupported derived image MIME type" }, { status: 415, headers: cors });
+        }
         const [originalUrl, thumbUrl, canvasUrl] = await Promise.all([
           getPresignedPutUrl(env, keys.key, contentTypes.original),
           body.hasThumb === false ? null : getPresignedPutUrl(env, keys.thumbKey, contentTypes.thumb),
           body.hasCanvas === false ? null : getPresignedPutUrl(env, keys.canvasKey, contentTypes.canvas)
         ]);
-        const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
-        const planToken = await signUploadPlan(secret, {
+        const planToken = await signUploadPlan(env.SESSION_SECRET, {
           id,
           exp: Date.now() + 60 * 60 * 1000,
           keys,
@@ -404,12 +433,12 @@ export default {
       // Commit D1 metadata only after direct R2 uploads are complete.
       if (url.pathname === "/api/upload/commit" && request.method === "POST") {
         const body = await request.json().catch(() => ({}));
-        const secret = env.SESSION_SECRET || env.AUTH_PASSWORD || "04112003";
-        const plan = await verifyUploadPlan(secret, body.planToken);
+        const plan = await verifyUploadPlan(env.SESSION_SECRET, body.planToken);
         if (!plan) return json({ error: "Upload plan is invalid or expired" }, { status: 401, headers: cors });
         if (!env.MEDIA || !env.DB) return json({ error: "Storage or database is not configured" }, { status: 500, headers: cors });
         const keys = plan.keys || {};
-        if (!keys.key || !String(keys.key).startsWith("photos/") || String(keys.key).split("/").slice(-2)[0] !== plan.id) {
+        const expectedKeys = uploadKeys(plan.id, new Date(plan.exp - 60 * 60 * 1000));
+        if (!keys.key || keys.key !== expectedKeys.key || keys.thumbKey !== expectedKeys.thumbKey || keys.canvasKey !== expectedKeys.canvasKey) {
           return json({ error: "Invalid upload keys" }, { status: 400, headers: cors });
         }
         const original = await env.MEDIA.head(keys.key);
@@ -428,11 +457,15 @@ export default {
           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \"ready\")",
           "ON CONFLICT(id) DO UPDATE SET r2_key = excluded.r2_key, preview_key = COALESCE(excluded.canvas_key, excluded.preview_key), thumb_key = excluded.thumb_key, canvas_key = excluded.canvas_key, status = \"ready\", width = COALESCE(excluded.width, photos.width), height = COALESCE(excluded.height, photos.height), caption = COALESCE(excluded.caption, photos.caption), tags = COALESCE(excluded.tags, photos.tags)"
         ].join(" ");
-        await env.DB.prepare(commitSql).bind(
-          plan.id, keys.key, canvas ? keys.canvasKey : null, thumb ? keys.thumbKey : null,
-          canvas ? keys.canvasKey : null, now.toISOString(), capturedAt, caption || null,
-          tags || null, width, height, original.size || null, mimeType
-        ).run();
+        try {
+          await env.DB.prepare(commitSql).bind(
+            plan.id, keys.key, canvas ? keys.canvasKey : null, thumb ? keys.thumbKey : null,
+            canvas ? keys.canvasKey : null, now.toISOString(), capturedAt, caption || null,
+            tags || null, width, height, original.size || null, mimeType
+          ).run();
+        } catch (error) {
+          return json({ error: "Metadata commit failed; uploaded media was left intact for retry" }, { status: 500, headers: cors });
+        }
         return json({ ok: true, id: plan.id, key: keys.key, thumbKey: thumb ? keys.thumbKey : null, canvasKey: canvas ? keys.canvasKey : null, capturedAt, width, height }, { headers: cors });
       }
 
@@ -457,6 +490,9 @@ export default {
         if (!file) {
           return json({ error: "File data is required" }, { status: 400, headers: cors });
         }
+        if (!/^[0-9a-f-]{20,64}$/i.test(String(id))) {
+          return json({ error: "A valid upload id is required" }, { status: 400, headers: cors });
+        }
 
         const now = new Date();
         const year = now.getUTCFullYear();
@@ -469,26 +505,23 @@ export default {
           ? `photos/${year}/${month}/${id}/canvas.${canvas.type === "image/jpeg" ? "jpg" : "webp"}`
           : null;
 
-        // Upload directly into R2
-        await env.MEDIA.put(key, file.stream(), {
-          httpMetadata: { contentType: mimeType }
-        });
-
-        if (thumb && typeof thumb.stream === "function") {
-          await env.MEDIA.put(thumbKey, thumb.stream(), {
-            httpMetadata: { contentType: thumb.type || "image/webp" }
-          });
-        }
-
-        if (canvas && typeof canvas.stream === "function") {
-          await env.MEDIA.put(canvasKey, canvas.stream(), {
-            httpMetadata: { contentType: canvas.type || "image/webp" }
-          });
+        try {
+          await env.MEDIA.put(key, file.stream(), { httpMetadata: { contentType: mimeType } });
+          if (thumb && typeof thumb.stream === "function") {
+            await env.MEDIA.put(thumbKey, thumb.stream(), { httpMetadata: { contentType: thumb.type || "image/webp" } });
+          }
+          if (canvas && typeof canvas.stream === "function") {
+            await env.MEDIA.put(canvasKey, canvas.stream(), { httpMetadata: { contentType: canvas.type || "image/webp" } });
+          }
+        } catch (error) {
+          await Promise.all([key, thumbKey, canvasKey].filter(Boolean).map((r2Key) => env.MEDIA.delete(r2Key).catch(() => {})));
+          throw error;
         }
 
         // Save metadata into D1
         if (env.DB) {
-          await env.DB.prepare(
+          try {
+            await env.DB.prepare(
             `INSERT INTO photos (
               id, r2_key, preview_key, thumb_key, canvas_key, created_at, captured_at, caption,
               tags, width, height, size_bytes, mime_type, status
@@ -518,7 +551,11 @@ export default {
               sizeBytes,
               mimeType
             )
-            .run();
+              .run();
+          } catch (error) {
+            await Promise.all([key, thumbKey, canvasKey].filter(Boolean).map((r2Key) => env.MEDIA.delete(r2Key).catch(() => {})));
+            throw error;
+          }
         }
 
         return json(

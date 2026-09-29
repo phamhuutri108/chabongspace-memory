@@ -57,8 +57,10 @@ The gallery caches server photo metadata in IndexedDB and falls back to the cach
 Added `ios/ChabongMemory.xcodeproj`: a small Swift/UIKit wrapper that loads `https://memory.chabongspace.com` in `WKWebView`, exposes a `chabongCamera` message handler, and presents an `AVCaptureSession` + `AVCapturePhotoOutput` native camera. Captured JPEG data is returned to the web UI through a `chabong-native-photo` DOM event, then enters the same IndexedDB/local-first upload queue as normal web uploads. The browser/PWA path keeps `getUserMedia()` as the fallback. Open `ios/ChabongMemory.xcodeproj` in Xcode, select a signing team, and run on an iPhone; camera permission is declared in `Info.plist`.
 
 ## Phase 10 — Production hardening
-**Status: ⬜**
-Remove hardcoded production password fallback, review CORS/session handling, secure R2 writes, preserve legacy photo compatibility, migrate old preview assets gradually, final benchmark on 500 / 1000 / 2000 photos.
+**Status: 🟩 Implemented**
+Authentication now fails closed unless `AUTH_PASSWORD` and `SESSION_SECRET` are configured; the old `04112003` fallback is removed. Session and upload-plan HMAC signatures are verified with Web Crypto instead of string comparison, with timestamp bounds and strict token shape checks. Worker CORS now allowlists the production gallery plus localhost development origins, and R2 bucket CORS no longer permits arbitrary Quick Tunnel origins by default. Direct upload planning validates supported image MIME types and deterministic object keys; legacy Worker-proxied uploads validate IDs and clean up partial R2 writes if either storage or D1 persistence fails. Existing `preview_key` remains supported, so older photo rows continue to render without a forced migration.
+
+Added `npm run benchmark`, a reproducible synthetic renderer/culling benchmark for 500 / 1000 / 2000 metadata records. It measures layout and viewport-culling CPU time only; it deliberately does not claim browser FPS, network throughput, or device memory. Real-device performance remains the final manual measurement.
 
 ## Checkpoint rule
 After every phase: 1) build, 2) test, 3) benchmark, 4) inspect diff, 5) commit checkpoint, 6) only then continue. If performance or stability gets worse, rollback the current phase before adding another layer.
