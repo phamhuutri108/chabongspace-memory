@@ -340,6 +340,9 @@ function App() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [camera, setCamera] = useState(false);
+  const [cameraZoom, setCameraZoom] = useState(1);
+  const [cameraFlash, setCameraFlash] = useState('auto');
+  const [cameraGrid, setCameraGrid] = useState(false);
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [zoom, setZoom] = useState(0.2);
@@ -1028,7 +1031,11 @@ function App() {
 
   async function startCamera() {
     if (window.webkit?.messageHandlers?.chabongCamera) {
-      window.webkit.messageHandlers.chabongCamera.postMessage({ action: 'capture' });
+      setCamera(true);
+      setCameraZoom(1);
+      setCameraFlash('auto');
+      document.body.classList.add('native-camera-active');
+      window.webkit.messageHandlers.chabongCamera.postMessage({ action: 'start' });
       return;
     }
     try {
@@ -1050,12 +1057,20 @@ function App() {
   }
 
   function stopCamera() {
+    if (window.webkit?.messageHandlers?.chabongCamera) {
+      window.webkit.messageHandlers.chabongCamera.postMessage({ action: 'stop' });
+      document.body.classList.remove('native-camera-active');
+    }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setCamera(false);
   }
 
   function capture() {
+    if (window.webkit?.messageHandlers?.chabongCamera) {
+      window.webkit.messageHandlers.chabongCamera.postMessage({ action: 'capture' });
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     const c = document.createElement('canvas');
@@ -1097,6 +1112,8 @@ function App() {
         const response = await fetch(dataUrl);
         const blob = await response.blob();
         await queueUpload(new File([blob], filename || `memory-${Date.now()}.jpg`, { type: blob.type || 'image/jpeg' }));
+        setCamera(false);
+        document.body.classList.remove('native-camera-active');
       } catch (error) {
         alert('Không thể lưu ảnh từ camera: ' + (error.message || 'Lỗi không xác định'));
       } finally {
@@ -1104,8 +1121,30 @@ function App() {
       }
     };
     window.addEventListener('chabong-native-photo', onNativePhoto);
-    return () => window.removeEventListener('chabong-native-photo', onNativePhoto);
+    const onNativeFlash = (event) => setCameraFlash(event.detail?.state || 'auto');
+    window.addEventListener('chabong-native-flash', onNativeFlash);
+    return () => {
+      window.removeEventListener('chabong-native-photo', onNativePhoto);
+      window.removeEventListener('chabong-native-flash', onNativeFlash);
+    };
   }, []);
+
+  function cameraCommand(action, payload = {}) {
+    window.webkit?.messageHandlers?.chabongCamera?.postMessage({ action, ...payload });
+  }
+
+  function setCameraZoomValue(value) {
+    setCameraZoom(value);
+    cameraCommand('zoom', { value });
+  }
+
+  function focusCamera(event) {
+    if (!window.webkit?.messageHandlers?.chabongCamera) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    cameraCommand('focus', { x, y });
+  }
 
   // Lightbox Actions
   function navigateLightbox(dir) {
@@ -1521,25 +1560,46 @@ function App() {
 
       {/* Camera Capture Modal */}
       {camera && (
-        <div className="camera">
-          <video ref={videoRef} playsInline muted />
-          <div>
+        <div className={`camera ${window.webkit?.messageHandlers?.chabongCamera ? 'native-camera' : 'web-camera'}`}>
+          <div className="camera-view" onClick={focusCamera}>
+            {!window.webkit?.messageHandlers?.chabongCamera && <video ref={videoRef} playsInline muted />}
+            {cameraGrid && <div className="camera-grid" aria-hidden="true" />}
+            <div className="camera-focus-hint" aria-hidden="true" />
+          </div>
+          <div className="camera-topbar">
+            <button className="camera-glass-button" onClick={stopCamera} aria-label="Close camera">×</button>
+            <div className="camera-top-spacer" />
             <button
-              className="icon-button"
-              onClick={capture}
-              aria-label="Capture"
-              title="Capture"
-            >
-              <Icon name="capture" />
-            </button>
-            <button
-              className="icon-button"
-              onClick={stopCamera}
-              aria-label="Close camera"
-              title="Close"
-            >
-              <Icon name="close" />
-            </button>
+              className={`camera-glass-button ${cameraFlash !== 'auto' ? 'active' : ''}`}
+              onClick={() => {
+                cameraCommand('flash');
+                if (!window.webkit?.messageHandlers?.chabongCamera) setCameraFlash(cameraFlash === 'auto' ? 'on' : cameraFlash === 'on' ? 'off' : 'auto');
+              }}
+              aria-label="Flash"
+            >{cameraFlash === 'on' ? 'ϟ' : cameraFlash === 'off' ? 'ϟ̸' : 'ϟA'}</button>
+            <button className={`camera-glass-button ${cameraGrid ? 'active' : ''}`} onClick={() => setCameraGrid((v) => !v)} aria-label="Grid">⌗</button>
+            <button className="camera-glass-button" onClick={() => cameraCommand('switch')} aria-label="Switch camera">↻</button>
+          </div>
+          <div className="camera-bottom">
+            <div className="camera-zoom-row">
+              {[0.5, 1, 2].map((value) => (
+                <button
+                  key={value}
+                  className={cameraZoom === value ? 'selected' : ''}
+                  onClick={() => setCameraZoomValue(value)}
+                >
+                  {value}×
+                </button>
+              ))}
+            </div>
+            <div className="camera-shutter-row">
+              <div className="camera-gallery-placeholder" />
+              <button className="camera-shutter" onClick={capture} aria-label="Capture">
+                <span />
+              </button>
+              <button className="camera-flip" onClick={() => cameraCommand('switch')} aria-label="Switch camera">↻</button>
+            </div>
+            <div className="camera-caption">MEMORY</div>
           </div>
         </div>
       )}
